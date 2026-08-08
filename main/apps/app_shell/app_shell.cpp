@@ -24,6 +24,9 @@ void AppSinan::onOpen()
     if (!_shell_up) {
         _shell_up = true;
         sinan::shell::init();
+        // 启动 Logo 的使命到壳起来为止。launcher 退役后没人替它收尸，
+        // 留着只会白吃渲染
+        GetHAL().bootLogo.reset();
     }
 }
 
