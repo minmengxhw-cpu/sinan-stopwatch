@@ -8,7 +8,6 @@
 #include <assets/assets.h>
 #include <functional>
 #include <hal/hal.h>
-#include <sinan/design.h>
 #include <cstdint>
 #include <vector>
 
@@ -45,7 +44,7 @@ public:
             _dots.push_back(std::make_unique<Container>(_panel->get()));
             _dots.back()->setAlign(LV_ALIGN_CENTER);
             _dots.back()->setPos(i * dot_gap - (pageNum - 1) * dot_gap / 2, 0);
-            _dots.back()->setBgColor(lv_color_hex(sinan::design::BRONZE));
+            _dots.back()->setBgColor(lv_color_hex(0xFFFFFF));
             _dots.back()->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
             _dots.back()->setRadius(LV_RADIUS_CIRCLE);
             _dots.back()->setSize(dot_size, dot_size);
@@ -123,7 +122,7 @@ public:
 
         // Create floating label
         _label = std::make_unique<Label>(parent);
-        _label->setTextColor(lv_color_hex(sinan::design::SILK));
+        _label->setTextColor(lv_color_hex(0xFFFFFF));
         _label->setTextFont(&MontserratSemiBold26);
         _label->setAlign(LV_ALIGN_CENTER);
         _label->addFlag(LV_OBJ_FLAG_FLOATING);

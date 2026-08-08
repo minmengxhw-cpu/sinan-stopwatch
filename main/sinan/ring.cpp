@@ -89,21 +89,12 @@ static void arc_anim_exec(void* obj, int32_t v)
     arc_set_range(a, ctx->start, e);
 }
 
-// 对象销毁时把动画上下文一起收掉。早期版本只 new 不 delete，
-// 每次开关应用泄一份，挂一天就不好看了
-static void arc_ctx_free(lv_event_t* e)
-{
-    auto* ctx = static_cast<ArcAnimCtx*>(lv_obj_get_user_data(lv_event_get_target_obj(e)));
-    delete ctx;
-}
-
 void arc_animate_to(lv_obj_t* a, float start_deg, float end_deg, uint32_t ms)
 {
     auto* ctx = static_cast<ArcAnimCtx*>(lv_obj_get_user_data(a));
     if (!ctx) {
         ctx = new ArcAnimCtx{};
         lv_obj_set_user_data(a, ctx);
-        lv_obj_add_event_cb(a, arc_ctx_free, LV_EVENT_DELETE, nullptr);
     }
     // 从当前终点接着动，避免连续调用时的跳变
     int32_t cur_s = 0, cur_e = 0;
@@ -209,11 +200,6 @@ lv_obj_t* mono_block(lv_obj_t* parent, const char* s, const lv_font_t* font, uin
     return l;
 }
 
-/*
- * 呼吸动画。重复调用是安全的，但会把周期从头重启 ——
- * 每秒重画一次的页面如果无脑重调，呼吸永远走不完一拍，看起来是抽搐。
- * 所以调用方要做边沿判断，只在"进入该呼吸的状态"时调一次。
- */
 void breathe(lv_obj_t* o, uint32_t period_ms, int opa_lo, int opa_hi)
 {
     if (period_ms < T_BREATH) period_ms = T_BREATH;
@@ -243,26 +229,15 @@ void bloom(lv_obj_t* a, float from_deg, uint32_t hex, uint32_t ms)
 {
     arc_set_color(a, hex);
     arc_set_range(a, from_deg - 2.0f, from_deg + 2.0f);
-
-    // 从 from_deg 向两侧张开。早期版本把 from_deg 塞进 user_data 却从不读，
-    // 结果永远从 12 点张开，跟当前弧的位置对不上
-    auto* ctx = static_cast<ArcAnimCtx*>(lv_obj_get_user_data(a));
-    if (!ctx) {
-        ctx = new ArcAnimCtx{};
-        lv_obj_set_user_data(a, ctx);
-        lv_obj_add_event_cb(a, arc_ctx_free, LV_EVENT_DELETE, nullptr);
-    }
-    ctx->start = from_deg;
-
+    // 两侧同时张开：起点往回退，终点往前推
     lv_anim_t an;
     lv_anim_init(&an);
     lv_anim_set_var(&an, a);
+    lv_anim_set_user_data(&an, reinterpret_cast<void*>(static_cast<intptr_t>(from_deg)));
     lv_anim_set_exec_cb(&an, [](void* obj, int32_t v) {
         lv_obj_t* arc_obj = static_cast<lv_obj_t*>(obj);
-        auto* c = static_cast<ArcAnimCtx*>(lv_obj_get_user_data(arc_obj));
-        const float mid = c ? c->start : 0.0f;
         const float half = v / 10.0f;
-        arc_set_range(arc_obj, mid - half, mid + half);
+        arc_set_range(arc_obj, -half, half);
     });
     lv_anim_set_values(&an, 20, 1800);
     lv_anim_set_time(&an, ms);

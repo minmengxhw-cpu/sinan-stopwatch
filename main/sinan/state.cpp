@@ -1,13 +1,6 @@
 #include "state.h"
-#include <functional>
 
 namespace sinan {
-
-State::State()
-{
-    // 递归的：mutate 里再调 decide 不会自锁
-    _mtx = xSemaphoreCreateRecursiveMutex();
-}
 
 State& State::get()
 {
@@ -17,34 +10,114 @@ State& State::get()
 
 Snapshot State::snapshot()
 {
-    Lock lk(_mtx);
-    return _s;   // 互斥量下允许堆分配，所以这里拷 std::string 是安全的
+    Snapshot copy;
+    portENTER_CRITICAL(&_mux);
+    copy = _s;
+    portEXIT_CRITICAL(&_mux);
+    return copy;
 }
 
-void State::mutate(const std::function<void(Snapshot&)>& fn)
+void State::withLock(void (*fn)(Snapshot&, void*), void* ctx)
 {
-    Lock lk(_mtx);
-    fn(_s);
+    portENTER_CRITICAL(&_mux);
+    fn(_s, ctx);
+    portEXIT_CRITICAL(&_mux);
 }
 
-void State::decide(const std::string& id, bool approved)
+void State::setBle(const BleState& s)
 {
-    Lock lk(_mtx);
-    if (approved) _s.tally.approved++;
-    else _s.tally.denied++;
+    portENTER_CRITICAL(&_mux);
+    _s.ble = s;
+    portEXIT_CRITICAL(&_mux);
+}
 
-    _s.ble.settled_id = id;      // 后续带同一个 id 的心跳一律忽略
+void State::clearPrompt()
+{
+    portENTER_CRITICAL(&_mux);
     _s.ble.has_prompt = false;
     _s.ble.prompt_id.clear();
     _s.ble.prompt_tool.clear();
     _s.ble.prompt_hint.clear();
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::setFleet(const FleetState& s)
+{
+    portENTER_CRITICAL(&_mux);
+    _s.fleet = s;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::setAlmanac(const AlmanacState& s)
+{
+    portENTER_CRITICAL(&_mux);
+    _s.almanac = s;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::setVoice(const VoiceState& s)
+{
+    portENTER_CRITICAL(&_mux);
+    _s.voice = s;
+    portEXIT_CRITICAL(&_mux);
 }
 
 void State::setLink(bool wifi, bool ws)
 {
-    Lock lk(_mtx);
+    portENTER_CRITICAL(&_mux);
     _s.wifi_up = wifi;
     _s.ws_up   = ws;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::bumpApproved()
+{
+    portENTER_CRITICAL(&_mux);
+    _s.tally.approved++;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::bumpDenied()
+{
+    portENTER_CRITICAL(&_mux);
+    _s.tally.denied++;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::setIrq(const IrqEvent& e)
+{
+    portENTER_CRITICAL(&_mux);
+    _s.irq = e;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::clearIrq()
+{
+    portENTER_CRITICAL(&_mux);
+    _s.irq.active = false;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::setHid(bool connected)
+{
+    portENTER_CRITICAL(&_mux);
+    _s.hid.connected = connected;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::setPasskey(uint32_t code)
+{
+    portENTER_CRITICAL(&_mux);
+    _s.ble.passkey_pending = true;
+    _s.ble.passkey = code;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::clearPasskey()
+{
+    portENTER_CRITICAL(&_mux);
+    _s.ble.passkey_pending = false;
+    portEXIT_CRITICAL(&_mux);
 }
 
 }  // namespace sinan

@@ -8,10 +8,13 @@
  */
 #include "bridge_ble.h"
 #include "state.h"
+#include "config.h"
+#include "haptics.h"
+#if SN_HID_ENABLE
+#include "bridge_hid.h"
+#endif
 #include <ArduinoJson.h>
 #include <esp_log.h>
-#include <esp_random.h>
-#include <sys/time.h>
 #include <hal/hal.h>
 #include <esp_heap_caps.h>
 #include <mbedtls/base64.h>
@@ -27,8 +30,6 @@
 #include <services/gap/ble_svc_gap.h>
 #include <services/gatt/ble_svc_gatt.h>
 
-#include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -65,25 +66,6 @@ struct XferCtx {
     FILE* fp = nullptr;
     size_t written = 0;
 };
-
-/*
- * 只保留最后一段路径，且只允许安全字符。
- * 拒绝 ".."、绝对路径、任何分隔符 —— 这条链路会写文件系统，
- * 而路径是从线上来的。
- */
-std::string sanitize_name(const std::string& raw)
-{
-    const size_t slash = raw.find_last_of("/\\");
-    std::string n = (slash == std::string::npos) ? raw : raw.substr(slash + 1);
-    if (n.empty() || n == "." || n == "..") return "";
-    if (n.size() > 48) return "";
-    for (char ch : n) {
-        const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-                        (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-';
-        if (!ok) return "";
-    }
-    return n;
-}
 
 // 收到新一批照片前先清空旧的，否则 4MB 分区几批就满了
 void wipe_dir(const std::string& dir)
@@ -166,12 +148,7 @@ void send_status_ack()
 
 void handle_heartbeat(JsonDocument& doc)
 {
-    // 全程在一把锁里原地改。早期版本是"读快照 → 改 → 写回"，
-    // 那是跨线程读改写：UI 线程刚清掉 prompt，这里就拿着批准前的
-    // 旧副本写回去，prompt 会诈尸，严重时同一个请求被批两次
-    bool is_new_prompt = false;
-    State::get().mutate([&](Snapshot& snap) {
-    BleState& s = snap.ble;
+    BleState s = State::get().snapshot().ble;
     s.connected    = true;
     s.last_beat    = GetHAL().millis();
     s.total        = doc["total"] | 0;
@@ -193,31 +170,23 @@ void handle_heartbeat(JsonDocument& doc)
     if (doc["prompt"].is<JsonObject>()) {
         JsonObject p = doc["prompt"];
         const std::string id = p["id"] | "";
-        if (id.empty()) {
-            s.has_prompt = false;
-        } else if (id == s.settled_id) {
-            // 已经批过/拒过了，桌面端还没跟上。吃掉这一拍陈旧心跳
-            s.has_prompt = false;
-        } else {
-            if (id != s.prompt_id) {
-                s.prompt_since = GetHAL().millis();
-                is_new_prompt = true;   // 震动放到锁外，别在临界区里碰硬件
-            }
-            s.has_prompt  = true;
-            s.prompt_id   = id;
-            s.prompt_tool = p["tool"] | "";
-            s.prompt_hint = p["hint"] | "";
+        if (!id.empty() && id != s.prompt_id) {
+            s.prompt_since = GetHAL().millis();
+            // 新请求到达才提醒，同一请求的重复心跳不再打扰
+            haptics::play(haptics::Cue::Alert);
         }
+        s.has_prompt  = !id.empty();
+        s.prompt_id   = id;
+        s.prompt_tool = p["tool"] | "";
+        s.prompt_hint = p["hint"] | "";
     } else {
         s.has_prompt = false;
         s.prompt_id.clear();
         s.prompt_tool.clear();
         s.prompt_hint.clear();
-        s.settled_id.clear();   // 桌面端已经不带 prompt 了，去重记录可以清了
     }
-    });
 
-    if (is_new_prompt) GetHAL().vibrate(180, 100);
+    State::get().setBle(s);
 }
 
 void handle_command(JsonDocument& doc)
@@ -228,27 +197,13 @@ void handle_command(JsonDocument& doc)
     if (std::strcmp(cmd, "status") == 0) {
         send_status_ack();
     } else if (std::strcmp(cmd, "name") == 0) {
-        // 广播名必须以 Claude 开头，否则桌面端的设备选择器过滤不到。
-        // 直接照抄用户给的名字会把设备改到再也扫不出来
         const char* n = doc["name"] | "";
-        // s_name 是 24 字节。超了会被 snprintf 截断成一个丑名字挂在广播上，
-        // 不如直接拒绝，让桌面端知道
-        if (!n || !*n) {
-            send_ack("name", false, 0, "empty");
-        } else if (std::strlen(n) > sizeof(s_name) - 8) {
-            send_ack("name", false, 0, "too long");
-        } else if (std::strncmp(n, "Claude", 6) == 0) {
-            std::snprintf(s_name, sizeof(s_name), "%s", n);
-            ble_svc_gap_device_name_set(s_name);
-            send_ack("name", true);
-        } else {
-            std::snprintf(s_name, sizeof(s_name), "Claude-%s", n);
-            ble_svc_gap_device_name_set(s_name);
-            send_ack("name", true);
-        }
+        std::snprintf(s_name, sizeof(s_name), "%s", n);
+        send_ack("name", true);
     } else if (std::strcmp(cmd, "owner") == 0) {
-        const std::string owner = doc["name"] | "";
-        State::get().mutate([&](Snapshot& s) { s.ble.owner = owner; });
+        BleState s = State::get().snapshot().ble;
+        s.owner = doc["name"] | "";
+        State::get().setBle(s);
         send_ack("owner", true);
     } else if (std::strcmp(cmd, "unpair") == 0) {
         ble_store_clear();
@@ -258,8 +213,7 @@ void handle_command(JsonDocument& doc)
         // 团团的照片走 "tuan" -> /spiflash/tuan
         if (s_xfer.fp) fclose(s_xfer.fp);
         s_xfer = XferCtx{};
-        std::string name = sanitize_name(doc["name"] | "misc");
-        if (name.empty()) name = "misc";
+        const std::string name = doc["name"] | "misc";
         s_xfer.dir = "/spiflash/" + name;
         mkdir(s_xfer.dir.c_str(), 0775);
         wipe_dir(s_xfer.dir);
@@ -267,14 +221,10 @@ void handle_command(JsonDocument& doc)
         send_ack("char_begin", true);
     } else if (std::strcmp(cmd, "file") == 0) {
         if (s_xfer.fp) fclose(s_xfer.fp);
-        // 只收 basename。对端是配过对的，但路径直接拼进 fopen 是白送的
-        // 目录穿越，`../../` 就能写到分区里任何地方
-        const std::string safe = sanitize_name(doc["path"] | "");
-        s_xfer.fp = (s_xfer.active && !safe.empty())
-                        ? fopen((s_xfer.dir + "/" + safe).c_str(), "wb")
-                        : nullptr;
+        const std::string path = doc["path"] | "";
+        s_xfer.fp = s_xfer.active ? fopen((s_xfer.dir + "/" + path).c_str(), "wb") : nullptr;
         s_xfer.written = 0;
-        send_ack("file", s_xfer.fp != nullptr, 0, s_xfer.fp ? nullptr : "bad path");
+        send_ack("file", s_xfer.fp != nullptr);
     } else if (std::strcmp(cmd, "chunk") == 0) {
         // 协议严格串行（发一块等一个 ack），所以收到就写，不用缓冲整个文件
         const char* b64 = doc["d"] | "";
@@ -298,7 +248,7 @@ void handle_command(JsonDocument& doc)
         s_xfer.active = false;
         photo::rescan();   // 新照片立刻生效，不用重启
         send_ack("char_end", true);
-        GetHAL().vibrate(120, 90);
+        haptics::play(haptics::Cue::Ok);
     }
 }
 
@@ -317,33 +267,13 @@ void handle_line(const std::string& line)
         return;
     }
     if (doc["time"].is<JsonArray>()) {
-        /*
-         * 桌面端授时：[epoch 秒, 时区偏移秒]。比 NTP 靠谱，它不需要联外网。
-         *
-         * **第二项不能丢。** 早期版本只取了 epoch，系统时间被设成 UTC 而时区
-         * 从没设过 —— 在上海，望页会显示比实际早 8 小时的时间，而且看起来
-         * 一切正常（数字在动、秒针在跑），只是不对。
-         */
+        // 桌面端授时：epoch 秒 + 时区偏移秒。比 NTP 靠谱，因为它不需要联外网
         const int64_t epoch = doc["time"][0] | 0;
         if (epoch > 0) {
             timeval tv{static_cast<time_t>(epoch), 0};
             settimeofday(&tv, nullptr);
+            GetHAL().syncSystemTimeToRtc();
         }
-        if (doc["time"].size() > 1) {
-            const int off = doc["time"][1] | 0;   // 东八区是 +28800
-            // POSIX TZ 的符号是反的：UTC+8 要写成 "UTC-8"
-            const int inv = -off;
-            char tz[24];
-            if (inv % 3600 == 0) {
-                std::snprintf(tz, sizeof(tz), "UTC%+d", inv / 3600);
-            } else {
-                std::snprintf(tz, sizeof(tz), "UTC%+d:%02d", inv / 3600,
-                              std::abs(inv % 3600) / 60);
-            }
-            GetHAL().setTimezone(tz);
-            ESP_LOGI(TAG, "tz offset %ds -> %s", off, tz);
-        }
-        if (epoch > 0) GetHAL().syncSystemTimeToRtc();
         return;
     }
     if (doc["evt"].is<const char*>()) {
@@ -390,8 +320,8 @@ const ble_gatt_chr_def kChrs[] = {
     {
         .uuid        = &kTxUuid.u,
         .access_cb   = chr_access,
-        .flags       = BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
         .val_handle  = &s_tx_attr,
+        .flags       = BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
     },
     {0},
 };
@@ -415,12 +345,14 @@ int gap_event(ble_gap_event* ev, void*)
                 s_conn = ev->connect.conn_handle;
                 // 先要求加密再放行数据。特征已标 ENC，这一步只是主动发起
                 ble_gap_security_initiate(s_conn);
-                State::get().mutate([](Snapshot& s) {
-                    s.ble.connected = true;
-                    s.ble.last_beat = GetHAL().millis();
-                });
-                GetHAL().vibrate(60, 60);
+                BleState s = State::get().snapshot().ble;
+                s.connected = true;
+                s.last_beat = GetHAL().millis();
+                State::get().setBle(s);
+                State::get().clearPasskey();
+                haptics::play(haptics::Cue::Pair);
             } else {
+                State::get().clearPasskey();
                 advertise();
             }
             break;
@@ -428,38 +360,32 @@ int gap_event(ble_gap_event* ev, void*)
         case BLE_GAP_EVENT_DISCONNECT: {
             s_conn = BLE_HS_CONN_HANDLE_NONE;
             s_rx_buf.clear();
-            State::get().mutate([](Snapshot& s) {
-                s.ble.connected  = false;
-                s.ble.has_prompt = false;
-                s.ble.passkey    = 0;
-                s.ble.prompt_id.clear();
-            });
+            BleState s = State::get().snapshot().ble;
+            s.connected  = false;
+            s.has_prompt = false;
+            s.prompt_id.clear();
+            State::get().setBle(s);
+            State::get().clearPasskey();
             advertise();
             break;
         }
 
-        case BLE_GAP_EVENT_PASSKEY_ACTION:
-            /*
-             * DisplayOnly：设备显示 6 位码，用户在 macOS 弹窗里输入。
-             * 只打到串口是不行的 —— 桌面终端平时没接串口，
-             * 码看不见就配不上对，守整条线是死的。写进 State 交给守去画。
-             */
-            if (ev->passkey.params.action == BLE_SM_IOACT_DISP) {
-                ble_sm_io io{};
-                io.action  = BLE_SM_IOACT_DISP;
-                // State 用 0 表示“不在配对”。同时固定为真正的六位数，避免
-                // 随机出 000000 时配对页被误判成无需显示。
-                io.passkey = 100000 + (esp_random() % 900000);
-                State::get().mutate([&](Snapshot& s) { s.ble.passkey = io.passkey; });
-                ESP_LOGI(TAG, "passkey %06u", static_cast<unsigned>(io.passkey));
-                GetHAL().vibrate(80, 90);
-                ble_sm_inject_io(ev->passkey.conn_handle, &io);
-            }
+        case BLE_GAP_EVENT_ENC_CHANGE:
+            // 加密链路建立（含配对完成），配对码页该收了
+            if (ev->enc_change.status == 0) State::get().clearPasskey();
             break;
 
-        case BLE_GAP_EVENT_ENC_CHANGE:
-            // 配对有结果了，码可以下屏
-            State::get().mutate([](Snapshot& s) { s.ble.passkey = 0; });
+        case BLE_GAP_EVENT_PASSKEY_ACTION:
+            // DisplayOnly：设备显示 6 位码，用户在 macOS 弹窗里输入。
+            // 码必须上屏 —— 只打 log 的话这条链路永远配不上
+            if (ev->passkey.params.action == BLE_SM_IOACT_DISP) {
+                ble_sm_io io{};
+                io.action = BLE_SM_IOACT_DISP;
+                io.passkey = esp_random() % 1000000;
+                ESP_LOGI(TAG, "passkey %06u", static_cast<unsigned>(io.passkey));
+                State::get().setPasskey(io.passkey);
+                ble_sm_inject_io(ev->passkey.conn_handle, &io);
+            }
             break;
 
         case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -474,15 +400,34 @@ int gap_event(ble_gap_event* ev, void*)
 
 void advertise()
 {
+    // 广播包 31 字节的预算分配：flags + 名字 + HID UUID16（让 macOS 认出键盘），
+    // 放不下的 NUS 128 位 UUID 与键盘外观挪进扫描响应
     ble_hs_adv_fields fields{};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.name  = reinterpret_cast<const uint8_t*>(s_name);
     fields.name_len = std::strlen(s_name);
     fields.name_is_complete = 1;
+#if SN_HID_ENABLE
+    static const ble_uuid16_t kHidUuid = BLE_UUID16_INIT(0x1812);
+    fields.uuids16 = const_cast<ble_uuid16_t*>(&kHidUuid);
+    fields.num_uuids16 = 1;
+    fields.uuids16_is_complete = 1;
+#else
     fields.uuids128 = const_cast<ble_uuid128_t*>(&kSvcUuid);
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = 1;
+#endif
     ble_gap_adv_set_fields(&fields);
+
+#if SN_HID_ENABLE
+    ble_hs_adv_fields rsp{};
+    rsp.uuids128 = const_cast<ble_uuid128_t*>(&kSvcUuid);
+    rsp.num_uuids128 = 1;
+    rsp.uuids128_is_complete = 1;
+    rsp.appearance = 0x03C1;  // Generic HID > Keyboard
+    rsp.appearance_is_present = 1;
+    ble_gap_adv_rsp_set_fields(&rsp);
+#endif
 
     ble_gap_adv_params adv{};
     adv.conn_mode = BLE_GAP_CONN_MODE_UND;
@@ -531,6 +476,11 @@ void start()
     ble_svc_gatt_init();
     ble_gatts_count_cfg(kSvcs);
     ble_gatts_add_svcs(kSvcs);
+#if SN_HID_ENABLE
+    // 单连接多服务：同一条加密链路上，系统看见键盘，Buddy 仍走 NUS
+    ble_gatts_count_cfg(sinan::hid::gatt_svcs());
+    ble_gatts_add_svcs(sinan::hid::gatt_svcs());
+#endif
     ble_svc_gap_device_name_set(s_name);
 
     nimble_port_freertos_init(host_task);
@@ -561,8 +511,9 @@ bool send_permission(const std::string& id, Decision d)
 
     if (!send_line(out)) return false;
 
-    // 记账 + 清 prompt + 记下去重 id，全在一把锁里完成
-    State::get().decide(id, d == Decision::Once);
+    if (d == Decision::Once) State::get().bumpApproved();
+    else State::get().bumpDenied();
+    State::get().clearPrompt();
     return true;
 }
 

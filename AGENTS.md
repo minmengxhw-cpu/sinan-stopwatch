@@ -1,13 +1,27 @@
 # 司南 SINAN — 单文件交付包
 
 > M5Stack StopWatch (C152) 桌面 AI 智能体控制台固件。全部规格与源码都在这一份文件里。
-> 生成于 2026-08-08。
+> 生成于 2026-08-07。
 
-> **v3.1 当前实现覆盖说明（2026-08-08）**：用户已明确推翻本文旧版 Fleet/Echo 方案。
-> Work 只允许 Codex、PASEO、Grok Build；Happy/HappyCode、Claude、知识库状态不进入 Work。
-> 独立 Echo/Voice 应用不注册也不编译。编程语音只在 Work 内进行：B 切工具、A 进入；
-> 工具内 A 开始录音、A 再次停止并转写，屏幕显示转写后由 B 明确发送。旧文中“松手即发”、
-> “待办/灵感记录”和 `auto_send` 均已废止。源码与 `README.md` 高于下文附录中的旧快照。
+---
+
+## ⚠ 2026-08-08 重构说明（先读这段）
+
+本文件大部分章节描述的是**重构前**的「五 App 并列」架构，已被
+[`docs/REFACTOR_SPEC.md`](docs/REFACTOR_SPEC.md) 定义的**四层壳**取代并实施完毕：
+
+- 旧的 app_gaze / app_ward / app_fleet / app_echo / app_almanac **已删除**，
+  逻辑迁入 `main/sinan/layer_rest|layer_work|layer_action|layer_interrupt`
+- 唯一的 mooncake 常驻应用是 `main/apps/app_shell`（AppSinan），launcher 退役，
+  Settings 由 Rest 层 B 长按直达
+- 新增：haptics（触感/方波语义表）、bridge_hid（BLE HID 键盘第三通道）、
+  beads（项圈珠串）、gaze_fsm（团团状态机）、shell（层切换与输入路由）、
+  talk_overlay（中央对讲）、debug_cli（串口调试）、web/prototype（浏览器原型）
+- 键位表以 `main/sinan/input_map.h` 为准（取代下文 §11 的交互约定）
+- 配对 passkey 已上屏（中断层 Pairing 脸）
+
+下文 §9（望）§守/阵/问/历 各节保留作设计意图参考；凡与新架构冲突，以
+`docs/REFACTOR_SPEC.md` + 当前源码为准。`design.h` 数值零改动这条约束仍然有效。
 
 ---
 
@@ -333,10 +347,6 @@ Nordic UART Service：
 {"cmd":"owner","name":"Felix"}
 ```
 
-**第二项不能丢。** 早期版本只取了 epoch，系统时间被设成 UTC 而时区从没设过 —— 在上海，望页会显示比实际早 8 小时的时间，而且看起来一切正常：数字在动、秒针在跑，只是不对。
-
-偏移量要转成 POSIX TZ 交给 `GetHAL().setTimezone()`，注意 **POSIX 的符号是反的**：UTC+8 要写成 `"UTC-8"`。
-
 **命令**（每个带 `cmd` 的都要回 ack）：`status` / `name` / `owner` / `unpair`，以及文件夹推送的 `char_begin` / `file` / `chunk` / `file_end` / `char_end`。
 
 ack 格式：`{"ack":"<同 cmd>","ok":true,"n":0}`
@@ -422,38 +432,6 @@ GetHAL().getAudioSpectrum();     // 20 段频谱，正好沿圆周每 18° 一�
 
 `AudioSpectrumFrame::bandCount == 20`。Echo 应用的电平环直接用这 20 段映射到圆周，一段 18°。这是上游白送的、参考方案完全没用的东西。
 
-### 9.1 松手即发（产品契约，不要加"确认发送"）
-
-```
-按住 A  → 录音（listening）
-松开 A  → 立刻发 asr_end → 转写 → 自动执行 → TTS 播报
-```
-
-**中间不允许有第二步确认。** 说完话还要再按一下确认，是把一句话的成本变成两个动作，这个功能就没人用了。只有 `config.toml` 里显式 `auto_send = false` 才会停在 `await_confirm`。
-
-三条不发送的岔路，都写进 `State.voice.note` 给人看：
-
-| 情况 | 表现 |
-|---|---|
-| 没有 WS 链路 | `begin()` 直接不开录，弦区 `no link`。**不要先录完再告诉人发不出去** |
-| 录音短于 280ms | `too short`，多半是误碰 |
-| 转写结果为空 | `didn't catch that`，不往下走 agent |
-
-daemon 每一步回一帧 `voice_status`，设备弦区才能显示 `transcribing` / `running`：
-
-```json
-{"t":"voice_status","phase":"transcribing"}
-{"t":"asr_result","text":"..."}
-{"t":"voice_status","phase":"running"}
-{"t":"say","text":"...","pcm":"<base64 s16le>"}
-```
-
-否则用户面对的是一个转圈的环，不知道卡在哪一步、还要不要等。
-
-这条契约有可跑的测试守着：`python3 daemon/test_voice_autosend.py` 必须 ALL PASSED。**改语音链路后跑一次。**
-
-### 9.2 音频接口
-
 **不接小智**。语音只做本地链路：录音 → WS 上传 → Mac 端 whisper 转写 → 交给用户的 CLI → 结果 TTS 回传播放。数据不出内网，也不引入第二套协议栈。
 
 ---
@@ -504,37 +482,13 @@ daemon 每一步回一帧 `voice_status`，设备弦区才能显示 `transcribin
 | 输入 | 行为 |
 |---|---|
 | 触摸 | 换下一张照片，900ms 交叉淡入 |
-| A 短按 | 切版式：寐（纯团团 + 分钟弧）/ 时（底部时间）/ 忆（好日子） |
+| A 短按 | 切版式：寐（纯团团 + 分钟弧）/ 时（底部时间）/ 大字 |
 | A 长按 | 锁定当前照片，不再自动轮换 |
 | B | 返回 launcher |
 | 敲桌面（IMU 冲击） | 亮度提到 60%，露出时间与日期，6 秒后回落。寐版式下这是唯一的看表方式 |
 | 倾斜 | 视差 |
 
 **Ward 收到 prompt 时自动从望切到守。** 待机页再好看，也不能挡住一个等着批准的请求。
-
-### 9.4b 喜 —— 照片轮播与好日子的环
-
-**这一页的概念不是"变老"，是"变化"，而且要落在快乐上。** 这条不是文案偏好，是结构约束：
-
-早期设计是"圆周从他来家那天铺到今天"。那是一条**进度条**，而进度条有终点 —— 看久了是在数余额。**不要做这个。**
-
-正确的形态是**收藏**：
-
-- 环上是一颗一颗刻度，**每张照片一颗，一颗就是一个好日子**
-- 刻度按 EXIF 拍摄日期分布在圆周上，但**只占 300°，留 60° 空着**。那 60° 是还没发生的好日子
-- **加照片只增不减。环永远不会满，只会越来越密。**
-- 弦区**不写"X 岁 Y 个月"**。年龄是减法。写那天是什么日子：海边、过年、抢飞盘。场景是加法
-- 没有 caption 时退回显示日期（`2022.03.19`），也不要退回年龄
-
-同一批照片、同一个圆，只换这一件事，情绪就反过来了。**改这一节前先把这段读完。**
-
-### 9.4c 日期只能来自 EXIF
-
-`manifest.json` 的 `items[].date` 由 `prep_photos.py` 从 EXIF `DateTimeOriginal` 读出，其次认文件名前缀 `YYYY-MM`。取不到就是 `null`。
-
-**任何地方都不允许手打日期，包括示意图和预览。** 手打过一次就错过一次（把 2020.10 写成了 2019.05），而且错得很难发现 —— 渲染出来的图看着一切正常。设备端和预览端一律从 manifest 读。
-
-`date` 为 `null` 的照片照常进轮播，只是不落在喜的环上。微信转发会剥掉 EXIF，所以实际到手的照片里有大半没有日期，这是常态不是异常。
 
 ### 9.5 团团点阵字形（守也要用）
 
@@ -559,7 +513,7 @@ daemon 每一步回一帧 `voice_status`，设备弦区才能显示 `transcribin
 - **照片解一次、存 PSRAM、之后只 blit。** 一张 536×536 RGB565 是 574KB，同时最多驻留两张（当前 + 交叉淡入的下一张）约 1.15MB，在 8MB PSRAM 里很宽裕。渲染循环里绝不解码。
 - **漂移只改 `lv_image_set_offset_x/y`。** 源图 536×536 比屏幕大 70px，就是给漂移留的余量。改 offset 是纯 blit；用 `lv_image_set_scale` 会触发软件重采样，全屏尺寸下一帧就吃掉预算。
 - **晕影用同心弧堆，不用带 alpha 的位图。** 三个好处：不占 flash、半径可运行时改（呼吸靠这个）、天然属于"一切都是弧"的设计语言。不透明度用平方曲线 `opa = 255 * t²`，线性过渡会看出台阶。
-- **解码要宽容颜色格式。** TJPGD 在不同配置下会吐 RGB565 也会吐 RGB888/XRGB8888。早期版本只认 RGB565，遇到 888 就整张丢掉 —— 望页全黑，日志里只有一行 `decode failed`，非常难查。现在三种都接，一次性转成 RGB565 存进 PSRAM，并把真实的 `cf/w/h/stride` 打进日志。**尺寸必须严格是 536×536**（拿原图 memcpy 进 574KB 缓冲，崩点会离现场很远）。
+- **`photo_store.cpp` 里 `lv_image_decoder_open` 那段需要对版本。** LVGL 9.x 各小版本签名有过调整，编译不过时对照 `components/lvgl/src/draw/lv_image_decoder.h` 修正，但要保持"解一次、存 PSRAM、只 blit"的契约。
 - **`onSwapDone()` 必须是 public**，交叉淡入的 `lv_timer` 回调要调它。
 
 ---
@@ -584,43 +538,23 @@ python3 scripts/prep_photos.py --center 1136,534 --radius 468 一张.jpg
 
 一张 536×536 q92 约 42KB，四十张才到 1.7MB 的推送上限。
 
-### 10.1a 构图规矩（这几条决定这一页好不好看）
-
-圆屏上的一张照片好不好看，不是"主体在不在框里"的问题。三条硬规矩：
-
-1. **脸约占圆直径六成。** 更小显得空，更大会切耳朵。
-2. **眼睛落在圆的四成高度，不是正中。** 正中会显得头重脚轻——这是人像的老规矩，圆形构图里更明显。
-3. **背景越少越好。** 晕影只吃得掉四个角，中间那一大片灰地砖它救不了。宁可裁紧到有点软，也不要构图松垮：60cm 观看距离上，构图坏比轻微软化明显得多。
-
-`scripts/crops-tuan.json` 是照这三条逐张定出来的，不是算出来的。**这类参数没有公式**，我按上面三条来回调了五轮才收敛，其中两轮还把左右方向弄反了（`cx` 增大是把主体往**左**推，因为裁框在往右移）。换照片就用 `pick_crops.html` 重来一遍，别指望自动。
-
-**默认用居中方裁，不要猜圆心。** 手机拍宠物基本都是居中构图，所以
-
-```bash
-python3 scripts/prep_photos.py --exif-only --zoom 1.35 照片...
-```
-
-就够了：只收有 EXIF 拍摄日期的照片，取画面正中的方形区域，`--zoom` 控制收紧程度。**不猜圆心就不可能把主体裁偏**，这是它比任何检测都强的地方。
-
-`--zoom` 实测：1.15 主体偏小，1.60 会切到头顶，**1.35 是最佳平衡**，已设为默认。
-
-只有主体确实不在中心的照片才需要单独处理，用 `scripts/pick_crops.html` 圈一下写进 `crops.json`。
-
-**不要再写自动检测。** 试过两套颜色启发式：按冷暖分割（木地板也是暖的，圈进半个客厅）、按白毛定位（白毛偏离头心，半径全靠蒙）。两套都在四成照片上失手。任意宠物照的主体定位不是颜色启发式能解的问题。
-
-正确流程是 `scripts/pick_crops.html`：浏览器打开，拖进照片，每张拖一个圈（圈外实时压暗，所见即设备上的样子），导出 `crops.json`，再 `--crops crops.json` 喂给管线。十几张照片十分钟，每张都对。`find_subject()` 只是没给 crops 时的兜底，不要指望它。
-
-**两种裁法**：`disc` 用于他蜷成球时（主体本身是圆的，占 72%，外环带清背景）；`portrait` 用于坐姿站姿（裁到头，占 90%，晕影收到 0.60，不清背景 —— 这类照片背景常是暖木色，跟毛色同色系，清了会把毛一起啃掉）。
-
-**`ImageOps.exif_transpose` 不能省。** 手机竖拍的照片元数据里带旋转标记，不应用的话狗是躺着的。从 ImageMagick 换到 PIL 时把 `-auto-orient` 弄丢过一次。
+**给用户挑照片的建议**（写进说明，不是给你的实现要求）：蜷成一团睡觉的最好，主体天然是圆的；站立或奔跑的照片要么被圆形遮罩切掉腿，要么主体太小。背景越单一，第 2 步的残留清理越干净。
 
 ### 10.2 送进设备：拖到 Hardware Buddy 上
 
 官方 BLE 协议的文件夹推送原文就说传输内容不限、1.8MB 以内。所以把 `build/tuantuan/` 直接拖到 Claude 桌面端的 Hardware Buddy 窗口，照片就流进设备了。`manifest.json` 里的 `"name":"tuan"` 会覆盖文件夹名，设备据此写进 `/spiflash/tuan/`。
 
-`bridge_ble.cpp` 里这套**已经实现**（`char_begin` 建目录并清空旧照片 → `file` 开文件 → `chunk` 解 base64 落盘 → `file_end` 关闭 → `char_end` 调 `photo::rescan()` 并震动一下）。协议严格串行（发一块等一个 ack），所以不缓冲整个文件，收到就写。
+`bridge_ble.cpp` 里 `char_begin`/`file`/`chunk`/`file_end` 目前只计数不落盘，**需要补完**：
 
-文件名经过 `sanitize_name()` 消毒：只取 basename，拒绝 `..`、绝对路径和任何分隔符。
+```
+char_begin -> 按 manifest 的 name 建目录 "/spiflash/" + name，先清空旧照片
+file       -> fopen(dir + "/" + path, "wb")
+chunk      -> mbedtls_base64_decode 后 fwrite，ack 里回已写字节数
+file_end   -> fclose
+char_end   -> 调 photo::init() 重扫目录
+```
+
+协议严格串行（发一块等一个 ack），所以不需要缓冲整个文件，收到就写。
 
 ### 10.3 备用路径
 
@@ -629,21 +563,6 @@ python3 scripts/prep_photos.py --exif-only --zoom 1.35 照片...
 ### 10.4 还没有照片时
 
 `app_gaze` 会显示一行 `drop a folder of photos on Hardware Buddy`。**空态是邀请，不是错误** —— 不要改成红色警告或错误码。
-
----
-
-## 10.5 前台应用路由
-
-`main/sinan/route.h`。有权限请求进来时，用户不应该还要自己去 launcher 里点开守。
-
-- `main.cpp` 在 `installApp` 之后用返回的 id 调 `route::register_app(name, id)`
-- 望/阵/问/历 在 `onRunning` 开头调一次 `route::yield_to_ward_if_needed()`，返回 true 就立即 return
-- 守处理完请求、落定态结束时调 `route::return_home_if_auto()` 回到开机应用
-- 开机应用由 `config.h` 的 `SN_BOOT_APP` 决定，默认 `"Gaze"`；空字符串则停在 launcher
-
-**不要把路由逻辑散进各个应用。** 判断在 route 里，应用只调用。
-
-问在录音中不让位（先让这一段录完），其余应用立即让位。
 
 ---
 
@@ -685,8 +604,7 @@ sinan/
 │   │   ├── ring.h/.cpp        # 圆形 UI 原语（弧、刻度、极坐标、大字）
 │   │   ├── precession.h/.cpp  # 岁差根容器 + 防烧屏
 │   │   ├── state.h/.cpp       # 全局状态快照
-│   │   ├── danger.h/.cpp      # 危险命令判定（含 selftest 样本）
-│   │   ├── route.h/.cpp       # 前台应用路由
+│   │   ├── danger.h/.cpp      # 危险命令判定
 │   │   ├── photo_store.h/.cpp # 照片解码与 PSRAM 缓存
 │   │   ├── bridge_ble.h/.cpp  # 官方 buddy 协议
 │   │   ├── bridge_ws.h/.cpp   # WebSocket 客户端
@@ -711,15 +629,8 @@ sinan/
 
 ## 13. 分期与验收
 
-> **当前状态（2026-08-07）**：全部条目**未验证**。代码写完了，但没有真机、没跑过 `idf.py build`。
-> 下面每一条都要在硬件到手后亲手勾，不要因为"看起来实现了"就打勾。
-
-**第 1 期**：骨架 + BLE + 守 + 望
+**第 1 期（当前）**：骨架 + BLE + 守 + 望
 - [ ] 项目能 build、能烧录、launcher 里出现五个应用图标
-- [ ] 开机直接进望，不停在 launcher
-- [ ] 配对时六位码在屏上，能在 macOS 弹窗里输完成配对
-- [ ] 从望/阵/历里都能被 prompt 自动拉到守，处理完自动回望
-- [ ] `sinan::selftest()` 危险规则样本全过
 - [ ] 岁差根容器工作，肉眼不可见但 20 小时转满一周
 - [ ] 设备以 `Claude-SINAN-XXXX` 广播，桌面端 Hardware Buddy 能扫到并配对成功（带加密）
 - [ ] 收到 `prompt` 时震动 + Rim 环变琥珀 + 倒计时收缩
@@ -750,34 +661,10 @@ sinan/
 | WiFi 连上但 BLE 断 | S3 单天线共存，WS 心跳间隔调到 ≥ 15 秒 |
 | 屏幕出现残影 | 岁差被关掉了 |
 | 望卡顿掉帧 | 照片层被提到了 30 FPS，或每帧在做缩放/解码 |
-| 照片躺着显示 | 漏了 `ImageOps.exif_transpose` |
-| 日期不对 | 某处手打了日期。一律从 manifest 读 |
-| 主体太小或切了头 | 调 `--zoom`；个别照片主体不在中心的用 `pick_crops.html` 单独圈 |
-| 照片有一圈硬边 | 晕影最外层没到纯黑，或没到 `VIG_OUTER` 236 |
-| portrait 照片背景没吃干净 | 晕影内缘用了 disc 的 174，应该是 140 |
-| 忆的文案和弦区叠在一起 | caption 必须让到 center+96，弦区固定在 y=372 |
-| 朱砂到处都是 | 无害的失败用了朱砂。只有守的不可逆操作能用 |
+| 照片有一圈硬边 | 晕影最外层没到纯黑，或半径超出了 `R_SAFE` |
 | 刻度盖在文字上 | 写坐标时把半径当成了绝对 y。刻度在 r=171–185 |
 | 弦区文字被切掉 | 超过 24 字符，顶出了 y=372 处的安全宽度 |
 | 长按没有字形 | `/spiflash/tuan/glyph.png` 不在，重跑 `prep_photos.py` 并重新推送 |
-| 开机一片全黑 | 岁差根容器没隐藏，或某个应用漏了 `root_release()` |
-| 批过的请求又冒出来 | 写 State 时用了"读快照→改→写回"，没走 `mutate()` |
-| 关中断期间崩在 malloc | State 退回自旋锁了。必须用互斥量 |
-| 语音播放时 WS 断线 | `handle_say` 里同步播了音频，要走播放队列 |
-| 呼吸像抽搐 | `breathe()` 被每帧重调。只在状态边沿调一次 |
-| 开机就卡死不动 | `root_acquire` 与 `LvglLockGuard` 顺序错了，嵌套非递归锁 |
-| 望页全黑但日志说解码成功 | 解出来是 RGB888，被当成格式错误丢掉了 |
-| 说完话没反应 | daemon 没回 `voice_status`，或有人加了"确认发送"那一步 |
-| daemon 关着时日志被刷爆 | WS 退避没生效，退回固定 3 秒重连了 |
-| WS 一直连不上，日志像在"不停重连" | 退避任务把**正在握手**的连接 stop 掉了。必须给 `kHandshakeGrace` 的窗口 |
-| 手动退出守之后望卡死不动 | 路由按 prompt id 去重了。必须用时间窗，否则 key 不变就永远不再切 |
-| 一次成功的语音在两分钟后变成 timed out | 播完没把 `_wait_start` 清零 |
-| 时间差了整数个小时 | 桌面端授时的时区偏移被丢了，或 POSIX TZ 符号没取反 |
-| 关不了机 | 连续按两次电源键，不是长按 |
-| 想真正关屏但找不到接口 | HAL 没暴露 PYG8 屏幕电源轨。设计上也不该关屏，靠岁差 |
-| 加外设后 I2C 冲突 | 触摸/IMU/RTC/PMIC/IOE/音频全在 G47-G48 一条总线上 |
-| 打开秒表/闹钟是一片黑 | 岁差根容器没在引用计数归零时隐藏，盖住了原厂应用 |
-| 桌面端改名后扫不到 | 广播名丢了 `Claude` 前缀 |
 | 换图时闪一下 | 交叉淡入没做完就换了 `_photo` 的 src |
 | PSRAM 分配失败 | 同时驻留超过两张照片，检查 `release()` 有没有漏调 |
 
@@ -832,27 +719,9 @@ idf_component_register(
         esp_event
         nvs_flash
         mbedtls
+    EMBED_FILES "assets/sfx/boot_sfx.bin"
+    EMBED_TXTFILES "hal/utils/config_ap/assets/badge_config_ap.html"
 )
-
-# 上游资产由 scripts/sync_upstream.sh 拉进来。缺文件时给一句人话，
-# 而不是让 CMake 甩一段找不着北的报错
-set(SINAN_EMBED "")
-if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/assets/sfx/boot_sfx.bin")
-    target_add_binary_data(${COMPONENT_LIB} "assets/sfx/boot_sfx.bin" BINARY)
-else()
-    message(WARNING "缺 assets/sfx/boot_sfx.bin —— 先跑 ./scripts/sync_upstream.sh")
-endif()
-if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/hal/utils/config_ap/assets/badge_config_ap.html")
-    target_add_binary_data(${COMPONENT_LIB} "hal/utils/config_ap/assets/badge_config_ap.html" TEXT)
-endif()
-if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/hal/hal.h")
-    message(FATAL_ERROR "缺 main/hal/ —— 先跑 ./scripts/sync_upstream.sh 再 idf.py build")
-endif()
-
-# 诊断应用（IMU / 麦克风频谱）。上板自检时打开：
-#   idf.py build -DSINAN_DIAG=1
-option(SINAN_DIAG "install upstream IMU / FFT diagnostic apps" OFF)
-target_compile_definitions(${COMPONENT_LIB} PUBLIC SINAN_DIAG=$<BOOL:${SINAN_DIAG}>)
 
 # 中文子集字体生成后由 scripts/build_cjk_font.sh 打开这个宏
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/assets/fonts/lv_font_sinan_serif_28.c")
@@ -1092,9 +961,7 @@ if __name__ == "__main__":
 #include <sinan/bridge_ble.h>
 #include <sinan/bridge_ws.h>
 #include <sinan/config.h>
-#include <sinan/danger.h>
 #include <sinan/precession.h>
-#include <sinan/route.h>
 #include <sinan/state.h>
 #include <smooth_ui_toolkit.hpp>
 #include <uitk/short_namespace.hpp>
@@ -1108,60 +975,33 @@ extern "C" void app_main(void)
     mclog::set_time_format(mclog::time_format_unix_milliseconds);
 
     GetHAL().init();
-    GetHAL().playBootSfx();   // 官方开机音，白送的仪式感
 
     ui_hal::on_delay([](uint32_t ms) { GetHAL().delay(ms); });
     ui_hal::on_get_tick([]() { return GetHAL().millis(); });
 
-    // 岁差根容器要在任何应用打开之前就位。它默认是隐藏的 ——
-    // 全屏不透明纯黑，不隐藏会把 launcher 整个盖掉
+    // 岁差根容器要在任何应用打开之前就位
     {
         LvglLockGuard lock;
         sinan::ui::precession_root();
     }
 
-    // 危险规则表改坏了会静默失效 —— 漏报没有代价可言，所以开机自测一次。
-    // 只 log 不阻塞启动：设备不能因为一条规则不对就开不了机
-    if (const int bad = sinan::selftest(); bad > 0) {
-        mclog::tagError("sinan", "danger selftest: {} fixture(s) failed", bad);
-    }
-
     // BLE：不需要配网，桌面端扫到就能连
     sinan::ble::start();
 
-    // WiFi + WS：连不上也无所谓，守照常工作
+    // WiFi + WS：连不上也无所谓，Ward 照常工作
     sinan::ws::start(SN_WIFI_SSID, SN_WIFI_PASS, SN_WS_URI);
 
     GetMooncake().installApp(std::make_unique<AppLauncher>());
-    sinan::route::register_app("Ward",    GetMooncake().installApp(std::make_unique<AppWard>()));
-    sinan::route::register_app("Fleet",   GetMooncake().installApp(std::make_unique<AppFleet>()));
-    sinan::route::register_app("Echo",    GetMooncake().installApp(std::make_unique<AppEcho>()));
-    sinan::route::register_app("Almanac", GetMooncake().installApp(std::make_unique<AppAlmanac>()));
-    sinan::route::register_app("Gaze",    GetMooncake().installApp(std::make_unique<AppGaze>()));
+    GetMooncake().installApp(std::make_unique<AppWard>());
+    GetMooncake().installApp(std::make_unique<AppFleet>());
+    GetMooncake().installApp(std::make_unique<AppEcho>());
+    GetMooncake().installApp(std::make_unique<AppAlmanac>());
+    GetMooncake().installApp(std::make_unique<AppGaze>());
     GetMooncake().installApp(std::make_unique<AppSetup>());
-
-    /*
-     * 官方原厂应用。它们画在 lv_screen_active()，司南画在岁差根容器上，
-     * 而根容器在引用计数归零时隐藏 —— 所以两套可以共存，互不遮挡。
-     * 改动根容器可见性策略的人要保住这一点。
-     */
-    GetMooncake().installApp(std::make_unique<AppStopWatch>());    // 板子就叫这名字
-    GetMooncake().installApp(std::make_unique<AppAlarmClock>());   // 硬件闹钟，司南没有
-    GetMooncake().installApp(std::make_unique<AppBadge>());        // 没 BLE 时的照片入口
-#if SINAN_DIAG
-    // 上板自检用：麦克风是不是坏的、IMU 有没有数据。
-    // 第一次点不亮时，先用它们排除硬件，再回来怪自己的代码
-    GetMooncake().installApp(std::make_unique<AppImu>());
-    GetMooncake().installApp(std::make_unique<AppFft>());
-#endif
-
-    // 开机直接进待机页，别停在 launcher —— 这是一台常驻的桌面终端，
-    // 不是一台等着你选功能的设备。SN_BOOT_APP 为空则保持 launcher
-    sinan::route::open(SN_BOOT_APP);
 
     while (1) {
         GetHAL().feedTheDog();
-        sinan::ui::precession_tick(GetHAL().millis());   // 内部自己持 LVGL 锁
+        sinan::ui::precession_tick(GetHAL().millis());
         GetMooncake().update();
     }
 }
@@ -1173,17 +1013,9 @@ extern "C" void app_main(void)
 <!-- FILE: main/apps/apps.h -->
 ```cpp
 #pragma once
-// 上游保留。app_template / app_watch_face / app_lucky_wheel 留在树里作参考，
-// 但不安装：望已经取代了表盘，转盘跟司南的视觉语言不搭
+// 上游保留
 #include "app_launcher/app_launcher.h"
 #include "app_setup/app_setup.h"
-#include "app_stopwatch/app_stopwatch.h"       // 这块板出厂就叫 StopWatch
-#include "app_alarm_clock/app_alarm_clock.h"   // 用了 HAL 的硬件闹钟，司南没有等价物
-#include "app_badge/app_badge.h"               // 不走 BLE 的照片上传路径
-#if SINAN_DIAG
-#include "app_imu/app_imu.h"
-#include "app_fft/app_fft.h"
-#endif
 // 司南
 #include "app_ward/app_ward.h"
 #include "app_fleet/app_fleet.h"
@@ -1212,14 +1044,8 @@ extern "C" void app_main(void)
 // Mac 上 sinand.py 的地址。查本机 IP：ipconfig getifaddr en0
 #define SN_WS_URI "ws://192.168.1.100:8790/sinan"
 
-/*
- * 开机直接进入哪个应用。留空字符串则停在 launcher。
- *
- * 默认 Gaze：望占了设备九成的时间，而守是被权限请求"拉起来"的 ——
- * 有请求时会自动从任何应用切过去，处理完再切回来，不需要你记得开它。
- * 可选 "Gaze" / "Ward" / "Fleet" / "Almanac" / "Echo" / ""
- */
-#define SN_BOOT_APP "Gaze"
+// 开机默认进入哪个应用（留空则停在 launcher）
+#define SN_BOOT_APP "Ward"
 ```
 
 
@@ -1234,7 +1060,6 @@ extern "C" void app_main(void)
  * 应用代码里出现字面量颜色或半径 = 设计系统失效。
  */
 #pragma once
-#include <assets/assets.h>
 #include <lvgl.h>
 #include <cstdint>
 
@@ -1250,11 +1075,10 @@ constexpr uint32_t BRONZE    = 0xC8A96E;  // 鎏金。刻度、次级标签
 constexpr uint32_t BRONZE_D  = 0x6E5C3A;  // 鎏金暗部
 constexpr uint32_t SILK      = 0xF2EDE1;  // 生宣。主数字、主文本
 constexpr uint32_t SILK_D    = 0x8A857B;  // 生宣暗部
-/* 语义色是一条**严重度轴**，不是场景标签。按严重度选，不要按"这是什么功能"选 */
-constexpr uint32_t MALACHITE = 0x4FA88A;  // 石绿。好 / 通过 / 健康
-constexpr uint32_t AMBER     = 0xE8A33D;  // 琥珀。需要你注意：等待决策、额度将尽、状态偏低
-constexpr uint32_t CINNABAR  = 0xD6442F;  // 朱砂。**只用于不可逆操作，全设备只有守能用**
-constexpr uint32_t INDIGO    = 0x3B4C8C;  // 靛青。没有信息：静默、断链、陈旧、无害的失败
+constexpr uint32_t CINNABAR  = 0xD6442F;  // 朱砂。危险、拒绝
+constexpr uint32_t MALACHITE = 0x4FA88A;  // 石绿。健康、通过
+constexpr uint32_t INDIGO    = 0x3B4C8C;  // 靛青。静默、待机、数据陈旧
+constexpr uint32_t AMBER     = 0xE8A33D;  // 琥珀。等待决策，唯一的"催促"色
 
 inline lv_color_t c(uint32_t hex) { return lv_color_hex(hex); }
 
@@ -1264,13 +1088,6 @@ constexpr int SCREEN = 466;
 constexpr int CENTER = 233;
 constexpr int R_MAX  = 233;
 constexpr int R_SAFE = 213;  // 物理安全边。任何元素不得越过
-
-/* 晕影按照片形态走。蜷成球的主体本身就是圆的，晕影可以收在外圈；
-   坐姿站姿的照片背景多，晕影要往里压才吃得掉 */
-constexpr int VIG_INNER_DISC     = 174;
-constexpr int VIG_INNER_PORTRAIT = 140;
-constexpr int VIG_OUTER          = 236;   // 必须越过 R_MAX，否则四角露白
-constexpr int VIG_RINGS          = 24;
 
 constexpr int R_RIM       = 219;  // Rim 环中线半径
 constexpr int W_RIM       = 10;
@@ -1310,9 +1127,13 @@ constexpr uint32_t STALE_MS     = 30000;
    数据用 Maple Mono（等宽，命令与路径不会跳动）
    中文用思源宋体子集（横细竖粗，鎏金上有金石感；黑体会像手机 App）*/
 
-/* 字体由上游 assets/assets.h 用 LV_FONT_DECLARE 声明在全局命名空间。
-   早期版本在这里 extern "C" 重声明了一遍 —— 同一批 C 链接符号在两个
-   命名空间各声明一次，部分编译器会报冲突。直接 include 上游的头。*/
+extern "C" {
+extern const lv_font_t CommissionerMedium108;
+extern const lv_font_t CommissionerMedium64;
+extern const lv_font_t lv_font_maple_mono_medium_48;
+extern const lv_font_t lv_font_maple_mono_medium_28;
+extern const lv_font_t lv_font_maple_mono_medium_24;
+}
 
 #define SN_FONT_NUM_XL (&CommissionerMedium108)
 #define SN_FONT_NUM_L  (&CommissionerMedium64)
@@ -1324,8 +1145,10 @@ constexpr uint32_t STALE_MS     = 30000;
    未生成时回落到 Montserrat，中文显示为空白 —— 刻意如此，
    空白比乱码更容易在自测时被发现。*/
 #if defined(SINAN_HAS_CJK_FONT)
-LV_FONT_DECLARE(lv_font_sinan_serif_28);
-LV_FONT_DECLARE(lv_font_sinan_serif_40);
+extern "C" {
+extern const lv_font_t lv_font_sinan_serif_28;
+extern const lv_font_t lv_font_sinan_serif_40;
+}
 #define SN_FONT_CJK_M (&lv_font_sinan_serif_28)
 #define SN_FONT_CJK_L (&lv_font_sinan_serif_40)
 #else
@@ -1522,21 +1345,12 @@ static void arc_anim_exec(void* obj, int32_t v)
     arc_set_range(a, ctx->start, e);
 }
 
-// 对象销毁时把动画上下文一起收掉。早期版本只 new 不 delete，
-// 每次开关应用泄一份，挂一天就不好看了
-static void arc_ctx_free(lv_event_t* e)
-{
-    auto* ctx = static_cast<ArcAnimCtx*>(lv_obj_get_user_data(lv_event_get_target_obj(e)));
-    delete ctx;
-}
-
 void arc_animate_to(lv_obj_t* a, float start_deg, float end_deg, uint32_t ms)
 {
     auto* ctx = static_cast<ArcAnimCtx*>(lv_obj_get_user_data(a));
     if (!ctx) {
         ctx = new ArcAnimCtx{};
         lv_obj_set_user_data(a, ctx);
-        lv_obj_add_event_cb(a, arc_ctx_free, LV_EVENT_DELETE, nullptr);
     }
     // 从当前终点接着动，避免连续调用时的跳变
     int32_t cur_s = 0, cur_e = 0;
@@ -1642,11 +1456,6 @@ lv_obj_t* mono_block(lv_obj_t* parent, const char* s, const lv_font_t* font, uin
     return l;
 }
 
-/*
- * 呼吸动画。重复调用是安全的，但会把周期从头重启 ——
- * 每秒重画一次的页面如果无脑重调，呼吸永远走不完一拍，看起来是抽搐。
- * 所以调用方要做边沿判断，只在"进入该呼吸的状态"时调一次。
- */
 void breathe(lv_obj_t* o, uint32_t period_ms, int opa_lo, int opa_hi)
 {
     if (period_ms < T_BREATH) period_ms = T_BREATH;
@@ -1676,26 +1485,15 @@ void bloom(lv_obj_t* a, float from_deg, uint32_t hex, uint32_t ms)
 {
     arc_set_color(a, hex);
     arc_set_range(a, from_deg - 2.0f, from_deg + 2.0f);
-
-    // 从 from_deg 向两侧张开。早期版本把 from_deg 塞进 user_data 却从不读，
-    // 结果永远从 12 点张开，跟当前弧的位置对不上
-    auto* ctx = static_cast<ArcAnimCtx*>(lv_obj_get_user_data(a));
-    if (!ctx) {
-        ctx = new ArcAnimCtx{};
-        lv_obj_set_user_data(a, ctx);
-        lv_obj_add_event_cb(a, arc_ctx_free, LV_EVENT_DELETE, nullptr);
-    }
-    ctx->start = from_deg;
-
+    // 两侧同时张开：起点往回退，终点往前推
     lv_anim_t an;
     lv_anim_init(&an);
     lv_anim_set_var(&an, a);
+    lv_anim_set_user_data(&an, reinterpret_cast<void*>(static_cast<intptr_t>(from_deg)));
     lv_anim_set_exec_cb(&an, [](void* obj, int32_t v) {
         lv_obj_t* arc_obj = static_cast<lv_obj_t*>(obj);
-        auto* c = static_cast<ArcAnimCtx*>(lv_obj_get_user_data(arc_obj));
-        const float mid = c ? c->start : 0.0f;
         const float half = v / 10.0f;
-        arc_set_range(arc_obj, mid - half, mid + half);
+        arc_set_range(arc_obj, -half, half);
     });
     lv_anim_set_values(&an, 20, 1800);
     lv_anim_set_time(&an, ms);
@@ -1740,22 +1538,7 @@ namespace sinan::ui {
 // 拿根容器。首次调用时创建，之后返回同一个
 lv_obj_t* precession_root();
 
-/*
- * 根容器是全屏不透明纯黑，会盖住上游的 launcher。
- * 所以它默认隐藏，由应用在 onOpen/onClose 成对 acquire/release。
- * 忘了 release 的后果是开机一片全黑，看起来像板子坏了。
- *
- * 【锁契约】这两个函数**要求调用方已经持有 LVGL 锁**，内部不再上锁。
- * 早期版本内部自己 LvglLockGuard，而四个应用是"先拿锁再调 acquire" ——
- * 非递归锁下这是死锁。契约统一成这样之后，两边写法都只有一种：
- *
- *   onOpen :  LvglLockGuard lock;  root_acquire();  建 UI
- *   onClose:  LvglLockGuard lock;  删 stage;  root_release();
- */
-void root_acquire();
-void root_release();
-
-// 主循环里每帧调一次。内部自己持 LVGL 锁，调用方不用再包一层
+// 主循环里每帧调一次。内部自己控节奏，调多了不会加速
 void precession_tick(uint32_t now_ms);
 
 // 亮度意图。由应用声明当前该多亮，实际下发做了平滑与去抖
@@ -1799,7 +1582,6 @@ static int s_jitter_phase        = 0;
 static Luma s_luma               = Luma::Normal;
 static Luma s_luma_applied       = Luma::Normal;
 static uint32_t s_luma_changed   = 0;
-static int s_refs                = 0;
 
 lv_obj_t* precession_root()
 {
@@ -1818,33 +1600,12 @@ lv_obj_t* precession_root()
     lv_obj_set_style_transform_pivot_x(s_root, CENTER, 0);
     lv_obj_set_style_transform_pivot_y(s_root, CENTER, 0);
     lv_obj_set_style_transform_rotation(s_root, s_offset_decideg, 0);
-    // 默认藏起来，否则这块全屏黑板会把 launcher 整个盖掉
-    lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
     return s_root;
-}
-
-void root_acquire()
-{
-    lv_obj_t* r = precession_root();
-    if (s_refs++ == 0) {
-        lv_obj_remove_flag(r, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(r);
-    }
-}
-
-void root_release()
-{
-    if (s_refs > 0 && --s_refs == 0 && s_root) {
-        lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
-    }
 }
 
 void precession_tick(uint32_t now_ms)
 {
     if (!s_root) return;
-
-    // 这里会动 LVGL 对象，而调用方是主循环，没有别处帮它上锁
-    LvglLockGuard lock;
 
     if (now_ms - s_last_precess >= PRECESS_INTERVAL_MS) {
         s_last_precess = now_ms;
@@ -1904,20 +1665,13 @@ int32_t precession_offset_decideg() { return s_offset_decideg; }
 /*
  * state.h — 全局状态。
  *
- * 职责边界：网络线程与 UI 线程之间唯一的数据交换点。
+ * 职责边界：这是网络线程与 UI 线程之间唯一的数据交换点。
  * 网络回调只写这里，应用只读这里的快照。任何一方都不要跨过它直接找对方。
- *
- * 并发模型：FreeRTOS 递归互斥量，不是自旋锁。
- * 早期版本用 portENTER_CRITICAL 保护，而临界区里要拷十几个 std::string ——
- * 关中断期间进堆分配器在 ESP32 上是教科书级的崩法。互斥量允许临界区里分配，
- * 代价是不能在 ISR 里用（我们也没有 ISR 写 State）。
  */
 #pragma once
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <string>
 
 namespace sinan {
@@ -1926,7 +1680,7 @@ namespace sinan {
 
 struct BleState {
     bool connected      = false;
-    uint32_t last_beat  = 0;
+    uint32_t last_beat  = 0;   // 最后一次心跳的 millis
     int total           = 0;
     int running         = 0;
     int waiting         = 0;
@@ -1940,11 +1694,7 @@ struct BleState {
     std::string prompt_hint;
     uint32_t prompt_since = 0;
 
-    // 已决策但心跳还没跟上的请求。见 State::decide() 的说明
-    std::string settled_id;
-
     std::string owner;
-    uint32_t passkey = 0;      // 非 0 表示正在配对，UI 要把它显示出来
 };
 
 /* ------------------------------ WS 侧 ------------------------------ */
@@ -1956,7 +1706,7 @@ struct Worker {
     std::string label;
     std::string task;
     WorkerState state = WorkerState::Down;
-    float quota       = 0.0f;
+    float quota       = 0.0f;  // 0.0–1.0 剩余比例
 };
 
 struct FleetState {
@@ -1970,30 +1720,30 @@ struct FleetState {
 struct AlmanacState {
     std::string number_code;
     std::string number_title;
-    std::string huangli_trend;
+    std::string huangli_trend;  // "up" / "flat" / "down"
     std::string huangli_yi;
     std::string huangli_ji;
-    int ring_doy = 0;
+    int ring_doy = 0;           // 年轮当前高亮的年内第几天
     std::string ring_tag;
     uint32_t last_recv = 0;
 };
 
 /* ------------------------------ 语音侧 ------------------------------ */
 
-enum class VoicePhase : uint8_t {
-    Idle, Recording, Sending, Transcribing, Thinking, Speaking, Error
-};
+enum class VoicePhase : uint8_t { Idle, Recording, Uploading, Thinking, Speaking };
 
 struct VoiceState {
     VoicePhase phase = VoicePhase::Idle;
     std::string heard;
     std::string reply;
-    std::string note;   // 出错时给人看的一行英文，如 "no link" / "too short"
 };
+
+/* ------------------------------ 计数 ------------------------------ */
 
 struct Tally {
     uint32_t approved = 0;
     uint32_t denied   = 0;
+    uint32_t uptime_s = 0;
 };
 
 struct Snapshot {
@@ -2013,36 +1763,23 @@ public:
     // 读：拿一份完整拷贝，之后随便用，不用再持锁
     Snapshot snapshot();
 
-    /*
-     * 写：在锁内对状态做原地修改。
-     *
-     * 所有写路径都必须走这个函数，不能"读快照 → 改 → 写回"——
-     * 那是跨线程的读改写，会丢更新：你按下批准清掉 prompt 的同时，
-     * BLE 任务正拿着批准前的旧副本准备写回，prompt 就诈尸了。
-     */
-    void mutate(const std::function<void(Snapshot&)>& fn);
+    // 写：只在网络线程调用。临界区里只做赋值，不做 IO、不碰 LVGL
+    void withLock(void (*fn)(Snapshot&, void*), void* ctx);
 
-    /*
-     * 记下一个已决策的请求 id 并立刻清掉 prompt，全程在同一把锁内。
-     * settled_id 用来吃掉后面几拍还带着同一个 prompt 的陈旧心跳 ——
-     * 桌面端要过一两百毫秒才知道我们批过了。
-     */
-    void decide(const std::string& id, bool approved);
-
+    // 便捷写入器
+    void setBle(const BleState& s);
+    void clearPrompt();
+    void setFleet(const FleetState& s);
+    void setAlmanac(const AlmanacState& s);
+    void setVoice(const VoiceState& s);
     void setLink(bool wifi, bool ws);
+    void bumpApproved();
+    void bumpDenied();
 
 private:
-    State();
+    State() = default;
     Snapshot _s;
-    SemaphoreHandle_t _mtx = nullptr;
-
-    class Lock {
-    public:
-        explicit Lock(SemaphoreHandle_t m) : _m(m) { xSemaphoreTakeRecursive(_m, portMAX_DELAY); }
-        ~Lock() { xSemaphoreGiveRecursive(_m); }
-    private:
-        SemaphoreHandle_t _m;
-    };
+    portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
 };
 
 }  // namespace sinan
@@ -2054,15 +1791,8 @@ private:
 <!-- FILE: main/sinan/state.cpp -->
 ```cpp
 #include "state.h"
-#include <functional>
 
 namespace sinan {
-
-State::State()
-{
-    // 递归的：mutate 里再调 decide 不会自锁
-    _mtx = xSemaphoreCreateRecursiveMutex();
-}
 
 State& State::get()
 {
@@ -2072,34 +1802,78 @@ State& State::get()
 
 Snapshot State::snapshot()
 {
-    Lock lk(_mtx);
-    return _s;   // 互斥量下允许堆分配，所以这里拷 std::string 是安全的
+    Snapshot copy;
+    portENTER_CRITICAL(&_mux);
+    copy = _s;
+    portEXIT_CRITICAL(&_mux);
+    return copy;
 }
 
-void State::mutate(const std::function<void(Snapshot&)>& fn)
+void State::withLock(void (*fn)(Snapshot&, void*), void* ctx)
 {
-    Lock lk(_mtx);
-    fn(_s);
+    portENTER_CRITICAL(&_mux);
+    fn(_s, ctx);
+    portEXIT_CRITICAL(&_mux);
 }
 
-void State::decide(const std::string& id, bool approved)
+void State::setBle(const BleState& s)
 {
-    Lock lk(_mtx);
-    if (approved) _s.tally.approved++;
-    else _s.tally.denied++;
+    portENTER_CRITICAL(&_mux);
+    _s.ble = s;
+    portEXIT_CRITICAL(&_mux);
+}
 
-    _s.ble.settled_id = id;      // 后续带同一个 id 的心跳一律忽略
+void State::clearPrompt()
+{
+    portENTER_CRITICAL(&_mux);
     _s.ble.has_prompt = false;
     _s.ble.prompt_id.clear();
     _s.ble.prompt_tool.clear();
     _s.ble.prompt_hint.clear();
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::setFleet(const FleetState& s)
+{
+    portENTER_CRITICAL(&_mux);
+    _s.fleet = s;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::setAlmanac(const AlmanacState& s)
+{
+    portENTER_CRITICAL(&_mux);
+    _s.almanac = s;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::setVoice(const VoiceState& s)
+{
+    portENTER_CRITICAL(&_mux);
+    _s.voice = s;
+    portEXIT_CRITICAL(&_mux);
 }
 
 void State::setLink(bool wifi, bool ws)
 {
-    Lock lk(_mtx);
+    portENTER_CRITICAL(&_mux);
     _s.wifi_up = wifi;
     _s.ws_up   = ws;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::bumpApproved()
+{
+    portENTER_CRITICAL(&_mux);
+    _s.tally.approved++;
+    portEXIT_CRITICAL(&_mux);
+}
+
+void State::bumpDenied()
+{
+    portENTER_CRITICAL(&_mux);
+    _s.tally.denied++;
+    portEXIT_CRITICAL(&_mux);
 }
 
 }  // namespace sinan
@@ -2133,9 +1907,6 @@ Risk assess(std::string_view tool, std::string_view hint);
 // 命中的规则名，用于在屏幕上告诉用户"为什么它是红的"
 const char* risk_reason(std::string_view tool, std::string_view hint);
 
-// 跑一遍内置样本，返回失败条数。改规则表后调一次，比上真机试快
-int selftest();
-
 }  // namespace sinan
 ```
 
@@ -2148,7 +1919,6 @@ int selftest();
 #include <algorithm>
 #include <cctype>
 #include <string>
-#include <esp_log.h>
 
 namespace sinan {
 
@@ -2175,16 +1945,6 @@ constexpr Rule kRules[] = {
     {"chmod 777",       "world writable",     Risk::Grave},
     {"| sh",            "pipe to shell",      Risk::Grave},
     {"| bash",          "pipe to shell",      Risk::Grave},
-    {"|sh",             "pipe to shell",      Risk::Grave},   // 无空格变体
-    {"|bash",           "pipe to shell",      Risk::Grave},
-    {"|zsh",            "pipe to shell",      Risk::Grave},
-    {"rm -r ",          "recursive delete",   Risk::Grave},   // 不带 f 的一样能删光
-    {"rm -rd",          "recursive delete",   Risk::Grave},
-    {"--force-with-lease", "force push",      Risk::Grave},   // 比 --force 温和，但照样改写远端
-    {"git checkout --", "discards work",      Risk::Grave},
-    {"chown -R",        "ownership change",   Risk::Grave},
-    {"killall",         "kills processes",    Risk::Elevated},
-    {"launchctl",       "changes daemons",    Risk::Elevated},
     {"drop table",      "drops data",         Risk::Grave},
     {"drop database",   "drops data",         Risk::Grave},
     {"truncate ",       "drops data",         Risk::Grave},
@@ -2197,35 +1957,7 @@ constexpr Rule kRules[] = {
     {"git commit",      "writes history",     Risk::Elevated},
     {"git push",        "writes remote",      Risk::Elevated},
     {"mv ",             "moves files",        Risk::Elevated},
-    // 只认贴着路径的重定向，别把 "a > b" 这种比较写法一起抓进来
-    {"> /",             "overwrites file",    Risk::Elevated},
-    {"> ~",             "overwrites file",    Risk::Elevated},
-    {">> /",            "appends to file",    Risk::Elevated},
-};
-
-/*
- * 自测样本。规则表改动后跑一次 selftest()，比在真机上试快得多。
- * 原则是宁可误报不可漏报：误报的代价是多按 0.8 秒，漏报没有代价可言。
- */
-struct Fixture { const char* tool; const char* hint; Risk want; };
-
-constexpr Fixture kFixtures[] = {
-    {"Bash", "rm -rf ~/project",                 Risk::Grave},
-    {"Bash", "rm -r build",                      Risk::Grave},
-    {"Bash", "sudo launchctl unload x",          Risk::Grave},
-    {"Bash", "git push --force origin main",     Risk::Grave},
-    {"Bash", "git push --force-with-lease",      Risk::Grave},
-    {"Bash", "curl https://x.sh|bash",           Risk::Grave},
-    {"Bash", "curl https://x.sh | sh",           Risk::Grave},
-    {"Bash", "git reset --hard HEAD~3",          Risk::Grave},
-    {"Bash", "dd if=/dev/zero of=/dev/disk2",    Risk::Grave},
-    {"Bash", "git commit -m fix",                Risk::Elevated},
-    {"Bash", "curl -s https://api.example.com",  Risk::Elevated},
-    {"Write", "src/main.cpp",                    Risk::Elevated},
-    {"Bash", "ls -la",                           Risk::Normal},
-    {"Bash", "echo \"a > b\"",                   Risk::Normal},
-    {"Read", "README.md",                        Risk::Normal},
-    {"Grep", "pattern",                          Risk::Normal},
+    {"> ",              "overwrites file",    Risk::Elevated},
 };
 
 std::string lower(std::string_view s)
@@ -2266,20 +1998,6 @@ const char* risk_reason(std::string_view tool, std::string_view hint)
     return r ? r->reason : "";
 }
 
-int selftest()
-{
-    int fails = 0;
-    for (const auto& f : kFixtures) {
-        const Risk got = assess(f.tool, f.hint);
-        if (got != f.want) {
-            ESP_LOGE("sinan.danger", "fixture failed: [%s] %s -> %d, want %d",
-                     f.tool, f.hint, static_cast<int>(got), static_cast<int>(f.want));
-            fails++;
-        }
-    }
-    return fails;
-}
-
 }  // namespace sinan
 ```
 
@@ -2318,16 +2036,6 @@ void release(const lv_image_dsc_t* dsc);
 
 const char* name_of(int index);
 
-// manifest.json 里那张照片的 caption（"海边""抢飞盘"）。没有就返回日期，
-// 再没有就返回空串。**永远不要在这里返回年龄** —— 见 AGENTS.md §9.4b
-const char* caption_of(int index);
-
-// manifest 里的 date，没有就是空串
-const char* date_of(int index);
-
-// 这张是不是 disc 形态（他蜷成球）。决定晕影内缘收在哪
-bool is_disc(int index);
-
 // 收到 BLE 文件夹推送后重扫
 void rescan();
 
@@ -2345,7 +2053,6 @@ void rescan();
 #include <esp_log.h>
 #include <strings.h>
 #include <algorithm>
-#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -2360,84 +2067,12 @@ constexpr int MAX_PHOTOS = 24;
 
 struct Slot {
     std::string file;
-    std::string caption;
-    std::string date;
-    bool disc = false;
     lv_image_dsc_t dsc{};
     void* pixels = nullptr;
     int refs = 0;
 };
 
 std::vector<Slot> s_slots;
-
-/* 一次性转格式，之后只 blit。转换发生在开图时，不在渲染循环里 */
-inline uint16_t to565(uint8_t r, uint8_t g, uint8_t b)
-{
-    return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
-}
-
-bool pack_rgb888(const uint8_t* src, uint32_t stride, uint16_t* dst)
-{
-    if (!src || !dst) return false;
-    for (int y = 0; y < SRC; y++) {
-        const uint8_t* row = src + static_cast<size_t>(y) * stride;
-        for (int x = 0; x < SRC; x++) {
-            // LVGL 的 RGB888 在内存里是 B,G,R
-            dst[y * SRC + x] = to565(row[x * 3 + 2], row[x * 3 + 1], row[x * 3 + 0]);
-        }
-    }
-    return true;
-}
-
-bool pack_xrgb8888(const uint8_t* src, uint32_t stride, uint16_t* dst)
-{
-    if (!src || !dst) return false;
-    for (int y = 0; y < SRC; y++) {
-        const uint8_t* row = src + static_cast<size_t>(y) * stride;
-        for (int x = 0; x < SRC; x++) {
-            dst[y * SRC + x] = to565(row[x * 4 + 2], row[x * 4 + 1], row[x * 4 + 0]);
-        }
-    }
-    return true;
-}
-
-/*
- * 读 manifest.json 的 caption / date。用最笨的字符串查找而不是 JSON 库 ——
- * 这个文件是我们自己生成的，格式固定，为它拖进一个解析器不值得。
- * 找不到 caption 就退回日期，都没有就是空串。
- */
-void load_captions()
-{
-    FILE* f = fopen((std::string(PHOTO_DIR) + "/manifest.json").c_str(), "rb");
-    if (!f) return;
-    std::string j;
-    char buf[512];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) j.append(buf, n);
-    fclose(f);
-
-    for (auto& s : s_slots) {
-        const std::string base = s.file.substr(s.file.find_last_of('/') + 1);
-        const size_t at = j.find("\"" + base + "\"");
-        if (at == std::string::npos) continue;
-        const size_t stop = j.find('}', at);
-
-        auto field = [&](const char* key) -> std::string {
-            const size_t k = j.find(std::string("\"") + key + "\"", at);
-            if (k == std::string::npos || (stop != std::string::npos && k > stop)) return "";
-            const size_t q1 = j.find('"', j.find(':', k) + 1);
-            if (q1 == std::string::npos) return "";
-            const size_t q2 = j.find('"', q1 + 1);
-            if (q2 == std::string::npos) return "";
-            return j.substr(q1 + 1, q2 - q1 - 1);
-        };
-
-        s.caption = field("caption");
-        s.date    = field("date");
-        s.disc    = (field("mode") == "disc");
-        if (s.caption.empty()) s.caption = s.date;
-    }
-}
 
 bool has_ext(const char* n, const char* ext)
 {
@@ -2467,10 +2102,9 @@ int init()
     }
     closedir(d);
 
-    // 按文件名排序，轮换顺序才可预期。prep_photos.py 已按拍摄日期编好号
+    // 按文件名排序，轮换顺序才可预期。用户给照片编号就是在排顺序
     std::sort(s_slots.begin(), s_slots.end(),
               [](const Slot& a, const Slot& b) { return a.file < b.file; });
-    load_captions();
     ESP_LOGI(TAG, "found %d photos", static_cast<int>(s_slots.size()));
     return static_cast<int>(s_slots.size());
 }
@@ -2482,21 +2116,6 @@ int count() { return static_cast<int>(s_slots.size()); }
 const char* name_of(int i)
 {
     return (i >= 0 && i < count()) ? s_slots[i].file.c_str() : "";
-}
-
-const char* caption_of(int i)
-{
-    return (i >= 0 && i < count()) ? s_slots[i].caption.c_str() : "";
-}
-
-const char* date_of(int i)
-{
-    return (i >= 0 && i < count()) ? s_slots[i].date.c_str() : "";
-}
-
-bool is_disc(int i)
-{
-    return (i >= 0 && i < count()) && s_slots[i].disc;
 }
 
 const lv_image_dsc_t* acquire(int index)
@@ -2522,9 +2141,9 @@ const lv_image_dsc_t* acquire(int index)
      * 用 LVGL 的解码器解到我们自己的 PSRAM 缓冲。
      * TJPGD 已在 sdkconfig 打开，LVGL 的 FS 盘符是 'A'。
      *
-     * 签名按 LVGL 9.5.x：lv_image_decoder_open(dsc, src, args)。
-     * 万一构建的是别的小版本导致签名对不上，改这三行即可，
-     * 但**必须保持"解一次、存 PSRAM、之后只 blit"这个契约**。
+     * NOTE(codex): lv_image_decoder 的签名在 LVGL 9.x 各小版本间有过调整。
+     * 编译不过时对照 components/lvgl/src/draw/lv_image_decoder.h 修正，
+     * 但要保持"解一次、存 PSRAM、之后只 blit"这个契约不变。
      */
     const std::string lv_path = "A:" + s.file;
 
@@ -2537,42 +2156,11 @@ const lv_image_dsc_t* acquire(int index)
         s.pixels = nullptr;
         return nullptr;
     }
-    /*
-     * 尺寸必须对（拿一张 4000×3000 的原图 memcpy 进 574KB 缓冲，
-     * 崩的位置会离现场很远），但**颜色格式要宽容**：
-     * TJPGD 在不同配置下会吐 RGB565 也会吐 RGB888，
-     * 早期版本只认 RGB565，遇到 888 就整张丢掉 —— 望页会全黑，
-     * 而日志里只有一行"decode failed"，非常难查。
-     */
-    bool ok = false;
     if (dec.decoded && dec.decoded->data) {
-        const lv_image_header_t& h = dec.decoded->header;
-        ESP_LOGI(TAG, "%s decoded %dx%d cf=%d stride=%d", s.file.c_str(),
-                 static_cast<int>(h.w), static_cast<int>(h.h),
-                 static_cast<int>(h.cf), static_cast<int>(h.stride));
-
-        if (h.w != SRC || h.h != SRC) {
-            ESP_LOGE(TAG, "%s: want %dx%d, run scripts/prep_photos.py first",
-                     s.file.c_str(), SRC, SRC);
-        } else if (h.cf == LV_COLOR_FORMAT_RGB565 && dec.decoded->data_size >= bytes) {
-            std::memcpy(s.pixels, dec.decoded->data, bytes);
-            ok = true;
-        } else if (h.cf == LV_COLOR_FORMAT_RGB888) {
-            ok = pack_rgb888(dec.decoded->data, h.stride ? h.stride : SRC * 3,
-                             static_cast<uint16_t*>(s.pixels));
-        } else if (h.cf == LV_COLOR_FORMAT_XRGB8888 || h.cf == LV_COLOR_FORMAT_ARGB8888) {
-            ok = pack_xrgb8888(dec.decoded->data, h.stride ? h.stride : SRC * 4,
-                               static_cast<uint16_t*>(s.pixels));
-        } else {
-            ESP_LOGE(TAG, "%s: unsupported cf=%d", s.file.c_str(), static_cast<int>(h.cf));
-        }
+        const size_t n = std::min(bytes, static_cast<size_t>(dec.decoded->data_size));
+        std::memcpy(s.pixels, dec.decoded->data, n);
     }
     lv_image_decoder_close(&dec);
-    if (!ok) {
-        heap_caps_free(s.pixels);
-        s.pixels = nullptr;
-        return nullptr;
-    }
 
     s.dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
     s.dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
@@ -2660,8 +2248,6 @@ const char* device_name();
 #include "state.h"
 #include <ArduinoJson.h>
 #include <esp_log.h>
-#include <esp_random.h>
-#include <sys/time.h>
 #include <hal/hal.h>
 #include <esp_heap_caps.h>
 #include <mbedtls/base64.h>
@@ -2677,8 +2263,6 @@ const char* device_name();
 #include <services/gap/ble_svc_gap.h>
 #include <services/gatt/ble_svc_gatt.h>
 
-#include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -2715,25 +2299,6 @@ struct XferCtx {
     FILE* fp = nullptr;
     size_t written = 0;
 };
-
-/*
- * 只保留最后一段路径，且只允许安全字符。
- * 拒绝 ".."、绝对路径、任何分隔符 —— 这条链路会写文件系统，
- * 而路径是从线上来的。
- */
-std::string sanitize_name(const std::string& raw)
-{
-    const size_t slash = raw.find_last_of("/\\");
-    std::string n = (slash == std::string::npos) ? raw : raw.substr(slash + 1);
-    if (n.empty() || n == "." || n == "..") return "";
-    if (n.size() > 48) return "";
-    for (char ch : n) {
-        const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-                        (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-';
-        if (!ok) return "";
-    }
-    return n;
-}
 
 // 收到新一批照片前先清空旧的，否则 4MB 分区几批就满了
 void wipe_dir(const std::string& dir)
@@ -2816,12 +2381,7 @@ void send_status_ack()
 
 void handle_heartbeat(JsonDocument& doc)
 {
-    // 全程在一把锁里原地改。早期版本是"读快照 → 改 → 写回"，
-    // 那是跨线程读改写：UI 线程刚清掉 prompt，这里就拿着批准前的
-    // 旧副本写回去，prompt 会诈尸，严重时同一个请求被批两次
-    bool is_new_prompt = false;
-    State::get().mutate([&](Snapshot& snap) {
-    BleState& s = snap.ble;
+    BleState s = State::get().snapshot().ble;
     s.connected    = true;
     s.last_beat    = GetHAL().millis();
     s.total        = doc["total"] | 0;
@@ -2843,31 +2403,23 @@ void handle_heartbeat(JsonDocument& doc)
     if (doc["prompt"].is<JsonObject>()) {
         JsonObject p = doc["prompt"];
         const std::string id = p["id"] | "";
-        if (id.empty()) {
-            s.has_prompt = false;
-        } else if (id == s.settled_id) {
-            // 已经批过/拒过了，桌面端还没跟上。吃掉这一拍陈旧心跳
-            s.has_prompt = false;
-        } else {
-            if (id != s.prompt_id) {
-                s.prompt_since = GetHAL().millis();
-                is_new_prompt = true;   // 震动放到锁外，别在临界区里碰硬件
-            }
-            s.has_prompt  = true;
-            s.prompt_id   = id;
-            s.prompt_tool = p["tool"] | "";
-            s.prompt_hint = p["hint"] | "";
+        if (!id.empty() && id != s.prompt_id) {
+            s.prompt_since = GetHAL().millis();
+            // 新请求到达才震动，同一请求的重复心跳不再打扰
+            GetHAL().vibrate(180, 100);
         }
+        s.has_prompt  = !id.empty();
+        s.prompt_id   = id;
+        s.prompt_tool = p["tool"] | "";
+        s.prompt_hint = p["hint"] | "";
     } else {
         s.has_prompt = false;
         s.prompt_id.clear();
         s.prompt_tool.clear();
         s.prompt_hint.clear();
-        s.settled_id.clear();   // 桌面端已经不带 prompt 了，去重记录可以清了
     }
-    });
 
-    if (is_new_prompt) GetHAL().vibrate(180, 100);
+    State::get().setBle(s);
 }
 
 void handle_command(JsonDocument& doc)
@@ -2878,27 +2430,13 @@ void handle_command(JsonDocument& doc)
     if (std::strcmp(cmd, "status") == 0) {
         send_status_ack();
     } else if (std::strcmp(cmd, "name") == 0) {
-        // 广播名必须以 Claude 开头，否则桌面端的设备选择器过滤不到。
-        // 直接照抄用户给的名字会把设备改到再也扫不出来
         const char* n = doc["name"] | "";
-        // s_name 是 24 字节。超了会被 snprintf 截断成一个丑名字挂在广播上，
-        // 不如直接拒绝，让桌面端知道
-        if (!n || !*n) {
-            send_ack("name", false, 0, "empty");
-        } else if (std::strlen(n) > sizeof(s_name) - 8) {
-            send_ack("name", false, 0, "too long");
-        } else if (std::strncmp(n, "Claude", 6) == 0) {
-            std::snprintf(s_name, sizeof(s_name), "%s", n);
-            ble_svc_gap_device_name_set(s_name);
-            send_ack("name", true);
-        } else {
-            std::snprintf(s_name, sizeof(s_name), "Claude-%s", n);
-            ble_svc_gap_device_name_set(s_name);
-            send_ack("name", true);
-        }
+        std::snprintf(s_name, sizeof(s_name), "%s", n);
+        send_ack("name", true);
     } else if (std::strcmp(cmd, "owner") == 0) {
-        const std::string owner = doc["name"] | "";
-        State::get().mutate([&](Snapshot& s) { s.ble.owner = owner; });
+        BleState s = State::get().snapshot().ble;
+        s.owner = doc["name"] | "";
+        State::get().setBle(s);
         send_ack("owner", true);
     } else if (std::strcmp(cmd, "unpair") == 0) {
         ble_store_clear();
@@ -2908,8 +2446,7 @@ void handle_command(JsonDocument& doc)
         // 团团的照片走 "tuan" -> /spiflash/tuan
         if (s_xfer.fp) fclose(s_xfer.fp);
         s_xfer = XferCtx{};
-        std::string name = sanitize_name(doc["name"] | "misc");
-        if (name.empty()) name = "misc";
+        const std::string name = doc["name"] | "misc";
         s_xfer.dir = "/spiflash/" + name;
         mkdir(s_xfer.dir.c_str(), 0775);
         wipe_dir(s_xfer.dir);
@@ -2917,14 +2454,10 @@ void handle_command(JsonDocument& doc)
         send_ack("char_begin", true);
     } else if (std::strcmp(cmd, "file") == 0) {
         if (s_xfer.fp) fclose(s_xfer.fp);
-        // 只收 basename。对端是配过对的，但路径直接拼进 fopen 是白送的
-        // 目录穿越，`../../` 就能写到分区里任何地方
-        const std::string safe = sanitize_name(doc["path"] | "");
-        s_xfer.fp = (s_xfer.active && !safe.empty())
-                        ? fopen((s_xfer.dir + "/" + safe).c_str(), "wb")
-                        : nullptr;
+        const std::string path = doc["path"] | "";
+        s_xfer.fp = s_xfer.active ? fopen((s_xfer.dir + "/" + path).c_str(), "wb") : nullptr;
         s_xfer.written = 0;
-        send_ack("file", s_xfer.fp != nullptr, 0, s_xfer.fp ? nullptr : "bad path");
+        send_ack("file", s_xfer.fp != nullptr);
     } else if (std::strcmp(cmd, "chunk") == 0) {
         // 协议严格串行（发一块等一个 ack），所以收到就写，不用缓冲整个文件
         const char* b64 = doc["d"] | "";
@@ -2967,33 +2500,13 @@ void handle_line(const std::string& line)
         return;
     }
     if (doc["time"].is<JsonArray>()) {
-        /*
-         * 桌面端授时：[epoch 秒, 时区偏移秒]。比 NTP 靠谱，它不需要联外网。
-         *
-         * **第二项不能丢。** 早期版本只取了 epoch，系统时间被设成 UTC 而时区
-         * 从没设过 —— 在上海，望页会显示比实际早 8 小时的时间，而且看起来
-         * 一切正常（数字在动、秒针在跑），只是不对。
-         */
+        // 桌面端授时：epoch 秒 + 时区偏移秒。比 NTP 靠谱，因为它不需要联外网
         const int64_t epoch = doc["time"][0] | 0;
         if (epoch > 0) {
             timeval tv{static_cast<time_t>(epoch), 0};
             settimeofday(&tv, nullptr);
+            GetHAL().syncSystemTimeToRtc();
         }
-        if (doc["time"].size() > 1) {
-            const int off = doc["time"][1] | 0;   // 东八区是 +28800
-            // POSIX TZ 的符号是反的：UTC+8 要写成 "UTC-8"
-            const int inv = -off;
-            char tz[24];
-            if (inv % 3600 == 0) {
-                std::snprintf(tz, sizeof(tz), "UTC%+d", inv / 3600);
-            } else {
-                std::snprintf(tz, sizeof(tz), "UTC%+d:%02d", inv / 3600,
-                              std::abs(inv % 3600) / 60);
-            }
-            GetHAL().setTimezone(tz);
-            ESP_LOGI(TAG, "tz offset %ds -> %s", off, tz);
-        }
-        if (epoch > 0) GetHAL().syncSystemTimeToRtc();
         return;
     }
     if (doc["evt"].is<const char*>()) {
@@ -3065,10 +2578,10 @@ int gap_event(ble_gap_event* ev, void*)
                 s_conn = ev->connect.conn_handle;
                 // 先要求加密再放行数据。特征已标 ENC，这一步只是主动发起
                 ble_gap_security_initiate(s_conn);
-                State::get().mutate([](Snapshot& s) {
-                    s.ble.connected = true;
-                    s.ble.last_beat = GetHAL().millis();
-                });
+                BleState s = State::get().snapshot().ble;
+                s.connected = true;
+                s.last_beat = GetHAL().millis();
+                State::get().setBle(s);
                 GetHAL().vibrate(60, 60);
             } else {
                 advertise();
@@ -3078,36 +2591,25 @@ int gap_event(ble_gap_event* ev, void*)
         case BLE_GAP_EVENT_DISCONNECT: {
             s_conn = BLE_HS_CONN_HANDLE_NONE;
             s_rx_buf.clear();
-            State::get().mutate([](Snapshot& s) {
-                s.ble.connected  = false;
-                s.ble.has_prompt = false;
-                s.ble.passkey    = 0;
-                s.ble.prompt_id.clear();
-            });
+            BleState s = State::get().snapshot().ble;
+            s.connected  = false;
+            s.has_prompt = false;
+            s.prompt_id.clear();
+            State::get().setBle(s);
             advertise();
             break;
         }
 
         case BLE_GAP_EVENT_PASSKEY_ACTION:
-            /*
-             * DisplayOnly：设备显示 6 位码，用户在 macOS 弹窗里输入。
-             * 只打到串口是不行的 —— 桌面终端平时没接串口，
-             * 码看不见就配不上对，守整条线是死的。写进 State 交给守去画。
-             */
+            // DisplayOnly：设备显示 6 位码，用户在 macOS 弹窗里输入
             if (ev->passkey.params.action == BLE_SM_IOACT_DISP) {
                 ble_sm_io io{};
-                io.action  = BLE_SM_IOACT_DISP;
+                io.action = BLE_SM_IOACT_DISP;
                 io.passkey = esp_random() % 1000000;
-                State::get().mutate([&](Snapshot& s) { s.ble.passkey = io.passkey; });
                 ESP_LOGI(TAG, "passkey %06u", static_cast<unsigned>(io.passkey));
-                GetHAL().vibrate(80, 90);
+                // TODO(app): 把 passkey 显示到屏幕上，见 app_ward 的 pairing 页
                 ble_sm_inject_io(ev->passkey.conn_handle, &io);
             }
-            break;
-
-        case BLE_GAP_EVENT_ENC_CHANGE:
-            // 配对有结果了，码可以下屏
-            State::get().mutate([](Snapshot& s) { s.ble.passkey = 0; });
             break;
 
         case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -3209,8 +2711,9 @@ bool send_permission(const std::string& id, Decision d)
 
     if (!send_line(out)) return false;
 
-    // 记账 + 清 prompt + 记下去重 id，全在一把锁里完成
-    State::get().decide(id, d == Decision::Once);
+    if (d == Decision::Once) State::get().bumpApproved();
+    else State::get().bumpDenied();
+    State::get().clearPrompt();
     return true;
 }
 
@@ -3274,9 +2777,6 @@ bool trigger(const char* action_id);
 #include <hal/hal.h>
 #include <mbedtls/base64.h>
 #include <nvs_flash.h>
-#include <freertos/queue.h>
-#include <freertos/task.h>
-#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -3285,12 +2785,8 @@ namespace sinan::ws {
 namespace {
 
 constexpr char TAG[] = "sinan.ws";
-// 一帧 base64 音频的硬顶，约 1.4MB 原始 PCM ≈ 45 秒 16k 单声道
-constexpr size_t kMaxPcmB64 = 1900 * 1024;
-constexpr size_t kMaxFrame  = 2 * 1024 * 1024;
 esp_websocket_client_handle_t s_client = nullptr;
 bool s_wifi_up = false;
-uint32_t s_last_start = 0;   // 上次调 start 的时刻，用于给握手留出窗口
 std::string s_buf;
 
 WorkerState parse_state(const char* s)
@@ -3318,7 +2814,7 @@ void handle_fleet(JsonDocument& doc)
         i++;
     }
     f.count = i;
-    State::get().mutate([&](Snapshot& s) { s.fleet = f; });
+    State::get().setFleet(f);
 }
 
 void handle_almanac(JsonDocument& doc)
@@ -3334,71 +2830,34 @@ void handle_almanac(JsonDocument& doc)
         a.ring_doy = doc["ring"][0]["doy"] | 0;
         a.ring_tag = doc["ring"][0]["tag"] | "";
     }
-    State::get().mutate([&](Snapshot& s) { s.almanac = a; });
-}
-
-/*
- * 播放队列。
- *
- * 早期版本在 WS 事件回调里同步 audioPlay ——
- * 一段几秒的语音会把整条 WebSocket 卡死，心跳丢完就断线重连。
- * 回调里只解码 + 投递，播放交给独立任务。
- */
-QueueHandle_t s_play_q = nullptr;
-
-struct PlayJob {
-    std::vector<int16_t>* pcm;
-};
-
-void play_task(void*)
-{
-    PlayJob job;
-    while (true) {
-        if (xQueueReceive(s_play_q, &job, portMAX_DELAY) != pdTRUE) continue;
-        if (job.pcm) {
-            GetHAL().audioPlay(*job.pcm, false);
-            delete job.pcm;
-        }
-        State::get().mutate([](Snapshot& s) { s.voice.phase = VoicePhase::Idle; });
-    }
+    State::get().setAlmanac(a);
 }
 
 void handle_say(JsonDocument& doc)
 {
-    const std::string text = doc["text"] | "";
-    State::get().mutate([&](Snapshot& s) {
-        s.voice.reply = text;
-        s.voice.phase = VoicePhase::Speaking;
-    });
+    VoiceState v = State::get().snapshot().voice;
+    v.reply = doc["text"] | "";
+    v.phase = VoicePhase::Speaking;
+    State::get().setVoice(v);
 
     const char* b64 = doc["pcm"] | "";
     const size_t b64len = std::strlen(b64);
     if (b64len == 0) {
-        State::get().mutate([](Snapshot& s) { s.voice.phase = VoicePhase::Idle; });
-        return;
-    }
-    // 硬顶。超了宁可只显示文字，也不要为一段跑飞的音频把堆吃穿
-    if (b64len > kMaxPcmB64) {
-        ESP_LOGW(TAG, "pcm too large (%u), text only", static_cast<unsigned>(b64len));
-        State::get().mutate([](Snapshot& s) { s.voice.phase = VoicePhase::Idle; });
+        v.phase = VoicePhase::Idle;
+        State::get().setVoice(v);
         return;
     }
 
     std::vector<uint8_t> raw(b64len * 3 / 4 + 4);
     size_t olen = 0;
     if (mbedtls_base64_decode(raw.data(), raw.size(), &olen,
-                              reinterpret_cast<const unsigned char*>(b64), b64len) != 0) {
-        State::get().mutate([](Snapshot& s) { s.voice.phase = VoicePhase::Idle; });
-        return;
+                              reinterpret_cast<const unsigned char*>(b64), b64len) == 0) {
+        std::vector<int16_t> pcm(olen / 2);
+        std::memcpy(pcm.data(), raw.data(), pcm.size() * 2);
+        GetHAL().audioPlay(pcm, false);
     }
-
-    auto* pcm = new std::vector<int16_t>(olen / 2);
-    std::memcpy(pcm->data(), raw.data(), pcm->size() * 2);
-    PlayJob job{pcm};
-    if (!s_play_q || xQueueSend(s_play_q, &job, 0) != pdTRUE) {
-        delete pcm;
-        State::get().mutate([](Snapshot& s) { s.voice.phase = VoicePhase::Idle; });
-    }
+    v.phase = VoicePhase::Idle;
+    State::get().setVoice(v);
 }
 
 void handle_line(const std::string& line)
@@ -3411,30 +2870,10 @@ void handle_line(const std::string& line)
     else if (std::strcmp(t, "almanac") == 0) handle_almanac(doc);
     else if (std::strcmp(t, "say") == 0)     handle_say(doc);
     else if (std::strcmp(t, "asr_result") == 0) {
-        const std::string heard = doc["text"] | "";
-        State::get().mutate([&](Snapshot& s) {
-            s.voice.heard = heard;
-            if (heard.empty()) {
-                // 转写出来是空的：多半没说清或者环境太吵，别让 UI 干等到超时
-                s.voice.phase = VoicePhase::Error;
-                s.voice.note  = "didn't catch that";
-            } else {
-                s.voice.phase = VoicePhase::Thinking;
-                s.voice.note.clear();
-            }
-        });
-    }
-    else if (std::strcmp(t, "voice_status") == 0) {
-        // daemon 汇报它走到哪一步了，好让弦区显示 transcribing / running
-        const char* ph = doc["phase"] | "";
-        State::get().mutate([&](Snapshot& s) {
-            if (std::strcmp(ph, "transcribing") == 0)   s.voice.phase = VoicePhase::Transcribing;
-            else if (std::strcmp(ph, "running") == 0)   s.voice.phase = VoicePhase::Thinking;
-            else if (std::strcmp(ph, "error") == 0) {
-                s.voice.phase = VoicePhase::Error;
-                s.voice.note  = doc["note"] | "failed";
-            }
-        });
+        VoiceState v = State::get().snapshot().voice;
+        v.heard = doc["text"] | "";
+        v.phase = VoicePhase::Thinking;
+        State::get().setVoice(v);
     } else if (std::strcmp(t, "ping") == 0) {
         JsonDocument out;
         out["t"]  = "pong";
@@ -3471,52 +2910,11 @@ void ws_event(void*, esp_event_base_t, int32_t id, void* data)
                     handle_line(s_buf);
                     s_buf.clear();
                 }
-                // 对端跑飞时别让缓冲无限涨。语音帧本来就大，顶设在 2MB
-                if (s_buf.size() > kMaxFrame) {
-                    ESP_LOGW(TAG, "frame over cap, dropped");
-                    s_buf.clear();
-                }
+                if (s_buf.size() > 32768) s_buf.clear();
             }
             break;
         default:
             break;
-    }
-}
-
-/*
- * 自己管重连退避。esp_websocket_client 的 reconnect_timeout_ms 是固定间隔，
- * daemon 关着的时候会每 3 秒敲一次门，一整天几万次，日志也刷没了。
- * 改成 3s 起步翻倍、上限 30s。
- */
-void backoff_task(void*)
-{
-    constexpr uint32_t kHandshakeGrace = 9000;   // 略大于 network_timeout_ms
-
-    uint32_t wait_ms = 3000;
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(500));
-        if (!s_client || !s_wifi_up) continue;
-
-        if (esp_websocket_client_is_connected(s_client)) {
-            wait_ms = 3000;                      // 连上了，退避归零
-            continue;
-        }
-
-        /*
-         * 关键：握手期间不要动它。
-         * 早期版本只看 is_connected()，而握手要几百毫秒到几秒 ——
-         * 500ms 醒一次的任务会把每一次正在建立的连接都 stop 掉，
-         * 结果是 WS 永远连不上，而日志里看着像"一直在重连"。
-         */
-        if (GetHAL().millis() - s_last_start < kHandshakeGrace) continue;
-
-        esp_websocket_client_stop(s_client);
-        vTaskDelay(pdMS_TO_TICKS(wait_ms));
-        if (s_wifi_up) {
-            s_last_start = GetHAL().millis();
-            esp_websocket_client_start(s_client);
-        }
-        wait_ms = wait_ms * 2 > 30000 ? 30000 : wait_ms * 2;
     }
 }
 
@@ -3531,10 +2929,7 @@ void wifi_event(void*, esp_event_base_t base, int32_t id, void*)
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         s_wifi_up = true;
         State::get().setLink(true, false);
-        if (s_client) {
-            s_last_start = GetHAL().millis();
-            esp_websocket_client_start(s_client);
-        }
+        if (s_client) esp_websocket_client_start(s_client);
     }
 }
 
@@ -3564,17 +2959,12 @@ void start(const char* ssid, const char* pass, const char* uri)
     esp_wifi_set_ps(WIFI_PS_NONE);
     esp_wifi_start();
 
-    // 播放任务先起来，第一条 say 到达时队列必须已经在
-    s_play_q = xQueueCreate(3, sizeof(PlayJob));
-    xTaskCreatePinnedToCore(play_task, "sinan_play", 4096, nullptr, 4, nullptr, 1);
-    xTaskCreatePinnedToCore(backoff_task, "sinan_ws_bk", 3072, nullptr, 3, nullptr, 1);
-
     esp_websocket_client_config_t wsc{};
-    wsc.uri = uri;
-    wsc.network_timeout_ms     = 8000;
-    wsc.disable_auto_reconnect = true;   // 退避自己管，见 backoff_task
-    // 15 秒心跳。调更短会跟 BLE 抢时隙，守那边会开始丢心跳
-    wsc.ping_interval_sec = 15;
+    wsc.uri                  = uri;
+    wsc.reconnect_timeout_ms = 3000;
+    wsc.network_timeout_ms   = 8000;
+    // 15 秒心跳。调更短会跟 BLE 抢时隙，Ward 那边会开始丢心跳
+    wsc.ping_interval_sec    = 15;
     s_client = esp_websocket_client_init(&wsc);
     esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY, ws_event, nullptr);
     ESP_LOGI(TAG, "ws target %s", uri);
@@ -3650,27 +3040,9 @@ bool trigger(const char* action_id)
 
 namespace sinan::voice {
 
-/*
- * 产品契约：松手即发。
- *
- *   按住 A → begin()  开录
- *   松开 A → end()    立刻收尾并发 asr_end，然后自动转写、执行、播报
- *
- * **不要在中间加"确认发送"那一步。** 说完话还要再按一下确认，
- * 是把一句话的成本变成两个动作，这个功能就没人用了。
- *
- * 三种不发送的情况，都在 end() 里判掉并写进 State.voice.note：
- *   没有 WS 链路 → "no link"，而且 begin() 直接就不开录，不做空录
- *   录音短于 280ms → "too short"，多半是误碰
- *   abort()      → 用户主动取消
- */
-
-void begin();
-void end();
-void abort();
-
-// 录音任务还在跑。UI 用它判断能不能开始下一次
-bool busy();
+void begin();  // 起录音任务
+void end();    // 收尾并发 asr_end
+void abort();  // 丢弃本次录音
 
 }  // namespace sinan::voice
 ```
@@ -3682,7 +3054,6 @@ bool busy();
 ```cpp
 #include "voice.h"
 #include "bridge_ws.h"
-#include <esp_log.h>
 #include "state.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -3696,17 +3067,10 @@ namespace {
 
 std::atomic<bool> s_running{false};
 std::atomic<bool> s_keep{false};
-std::atomic<bool> s_aborted{false};
 TaskHandle_t s_task = nullptr;
 
 // 每片 240ms。太短则 WS 帧太密挤掉 BLE，太长则说完到出结果的延迟明显
 constexpr uint16_t kSliceMs = 240;
-
-// 短于这个就当误碰，不发。说一个字也要 300ms 以上
-constexpr uint32_t kMinRecMs = 280;
-
-std::atomic<uint32_t> s_started{0};
-std::atomic<uint32_t> s_elapsed{0};
 
 void record_task(void*)
 {
@@ -3720,30 +3084,11 @@ void record_task(void*)
         if (!slice.empty()) ws::send_audio_chunk(slice.data(), slice.size(), seq++);
     }
 
-    const uint32_t took = GetHAL().millis() - s_started.load();
-    s_elapsed.store(took);
+    ws::send_audio_end();
 
-    if (s_aborted.load()) {
-        // 主动取消：也要发 asr_end 把 daemon 那边的会话收干净，但不期待结果
-        ws::send_audio_end();
-        State::get().mutate([](Snapshot& s) {
-            s.voice = VoiceState{};
-        });
-    } else if (took < kMinRecMs) {
-        ws::send_audio_end();
-        State::get().mutate([](Snapshot& s) {
-            s.voice.phase = VoicePhase::Error;
-            s.voice.note  = "too short";
-        });
-        ESP_LOGI("sinan.voice", "discarded, only %ums", static_cast<unsigned>(took));
-    } else {
-        // 松手即发：asr_end 一发出去，daemon 就开始转写，不需要用户再确认
-        ws::send_audio_end();
-        State::get().mutate([](Snapshot& s) {
-            s.voice.phase = VoicePhase::Sending;
-            s.voice.note.clear();
-        });
-    }
+    VoiceState v = State::get().snapshot().voice;
+    v.phase = VoicePhase::Uploading;
+    State::get().setVoice(v);
 
     s_running.store(false);
     s_task = nullptr;
@@ -3756,46 +3101,24 @@ void begin()
 {
     if (s_running.load()) return;
 
-    // 没有链路就别空录。录完一段再告诉你发不出去，是最气人的那种交互
-    if (!ws::connected()) {
-        State::get().mutate([](Snapshot& s) {
-            s.voice = VoiceState{};
-            s.voice.phase = VoicePhase::Error;
-            s.voice.note  = "no link";
-        });
-        return;
-    }
+    VoiceState v;
+    v.phase = VoicePhase::Recording;
+    State::get().setVoice(v);
 
-    State::get().mutate([](Snapshot& s) {
-        s.voice = VoiceState{};
-        s.voice.phase = VoicePhase::Recording;
-    });
-
-    s_aborted.store(false);
-    s_started.store(GetHAL().millis());
     s_keep.store(true);
     s_running.store(true);
     // 录音必须离开 UI 线程，否则 audioRecord 的阻塞会把动画卡成幻灯片
     xTaskCreatePinnedToCore(record_task, "sinan_rec", 6144, nullptr, 5, &s_task, 1);
 }
 
-void end() { s_keep.store(false); }   // 录音任务会自己收尾并发送
-
-bool busy() { return s_running.load(); }
+void end() { s_keep.store(false); }
 
 void abort()
 {
-    s_aborted.store(true);
     s_keep.store(false);
-    // 等录音任务真的退出再放行。不等的话，紧接着的 begin() 会跟
-    // 还在跑的旧任务抢麦克风，第二次录音直接拿到空数据
-    for (int i = 0; i < 40 && s_running.load(); i++) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    State::get().mutate([](Snapshot& s) {
-        s.voice.phase = VoicePhase::Idle;
-        s.voice.heard.clear();
-    });
+    VoiceState v;
+    v.phase = VoicePhase::Idle;
+    State::get().setVoice(v);
 }
 
 }  // namespace sinan::voice
@@ -3813,7 +3136,6 @@ void abort()
 #include <apps/common/key_manager/key_manager.h>
 #include <mooncake.h>
 #include <lvgl.h>
-#include <cstdint>
 #include <array>
 #include <memory>
 
@@ -3850,10 +3172,7 @@ private:
     const lv_image_dsc_t* _next_dsc = nullptr;
 
     int _index    = 0;
-    int _vig_inner = 174;   // 晕影内缘，随照片形态变
-    int _layout   = 0;   // 0 寐(纯团团+分钟弧) / 1 时(底部时间) / 2 忆(好日子)
-    lv_obj_t* _joy_ring = nullptr;   // 忆：好日子的刻度环
-    lv_obj_t* _joy_cap  = nullptr;   // 忆：那天是什么日子
+    int _layout   = 0;   // 0 寐(纯团团+分钟弧) / 1 时(底部时间) / 2 大字
     bool _locked  = false;
     int _last_min = -1;
     bool _touch_was_down = false;
@@ -3872,8 +3191,6 @@ private:
     void tick_dot(uint32_t now);
     void tick_clock(bool force);
     void tick_rim();
-    void build_joy();
-    void show_joy(bool on);
     void swap_photo();
 };
 ```
@@ -3896,7 +3213,6 @@ private:
 #include <sinan/precession.h>
 #include <sinan/photo_store.h>
 #include <sinan/state.h>
-#include <sinan/route.h>
 #include <hal/hal.h>
 #include <mooncake_log.h>
 #include <algorithm>
@@ -3934,19 +3250,7 @@ constexpr float kTiltText  = 2.0f;
 
 constexpr float kPi = 3.14159265358979f;
 
-/*
- * 晕影的第 i 圈半径。inner 由照片形态决定 ——
- * 早期版本只有一套固定半径，portrait 的照片放上去背景吃不干净，
- * 而我给你看的预览用的是分档的值，代码和预览对不上。
- */
-int vig_radius(int i, int shift, int inner)
-{
-    const float step = static_cast<float>(VIG_OUTER - inner) / (VIG_RINGS - 1);
-    return inner + static_cast<int>(i * step) + shift;
-}
-
-// 时间只在「时」版式常显，寐是敲桌临时露出，忆不显示。所以只有一个位置
-constexpr int kTimeY = 118;
+int vig_radius(int i, int shift) { return R_SAFE - 18 + i * 2 + shift; }
 
 }  // namespace
 
@@ -3965,8 +3269,6 @@ void AppGaze::onOpen()
     _t_swap = GetHAL().millis();
 
     LvglLockGuard lock;
-    ui::root_acquire();   // 与 onClose 的 root_release 成对，漏了会全屏黑
-
     _stage = ui::stage(ui::precession_root());
 
     /* ---- 层 0：照片 ---- */
@@ -3981,7 +3283,6 @@ void AppGaze::onOpen()
     lv_image_set_inner_align(_photo_next, LV_IMAGE_ALIGN_TOP_LEFT);
     lv_obj_set_style_opa(_photo_next, LV_OPA_TRANSP, 0);
 
-    _vig_inner = photo::is_disc(_index) ? VIG_INNER_DISC : VIG_INNER_PORTRAIT;
     _cur_dsc = photo::acquire(_index);
     if (_cur_dsc) {
         lv_image_set_src(_photo, _cur_dsc);
@@ -4025,8 +3326,6 @@ void AppGaze::onOpen()
     lv_obj_align(_date, LV_ALIGN_CENTER, 0, 168);
     lv_obj_set_style_opa(_date, LV_OPA_TRANSP, 0);
 
-    build_joy();
-
     /* ---- 层 4：外圈点 ----
        边牧的本职工作是 outrun —— 绕着羊群跑一个大弧把它们收拢。
        所以这个页面没有秒针，只有团团在跑外圈 */
@@ -4067,70 +3366,33 @@ void AppGaze::build_vignette()
         // 于是照片没有边缘，是悬浮在黑暗里的
         const float t = static_cast<float>(i) / (kVignetteRings - 1);
         const int opa = static_cast<int>(255.0f * t * t);  // 平方曲线，线性会看出台阶
-        _vig[i] = ui::arc(_stage, {vig_radius(i, 0, _vig_inner), 3, INK, INK, false}, 0, 359.9f);
+        _vig[i] = ui::arc(_stage, {vig_radius(i, 0), 3, INK, INK, false}, 0, 359.9f);
         lv_obj_set_style_arc_opa(_vig[i], opa, LV_PART_INDICATOR);
     }
 }
 
 /*
- * 三个版式：
- *
- *   寐  默认。团团蜷成的正圆本身就是钟面，上面不该压任何东西。
- *       想知道几点敲一下桌子就行。
- *   时  常显时间，数字锚在下三分之一，不压他的头。
- *   忆  好日子。外圈每一颗刻度是一张照片、一个日子，弦区写那天是什么日子。
- *       **不写年龄** —— 年龄是减法，日子是加法。环只占 300°，
- *       留 60° 是还没发生的好日子，所以它永远不会满，只会越来越密。
+ * 三个版式。默认是「寐」—— 团团蜷成的正圆本身就是钟面，
+ * 上面不该压任何东西。想知道几点敲一下桌子就行。
  */
 void AppGaze::apply_layout()
 {
     const bool sleep = (_layout == 0);
-    const bool joy   = (_layout == 2);
 
-    lv_obj_set_style_opa(_time,  sleep || joy ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    lv_obj_set_style_opa(_time,  sleep ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
     lv_obj_set_style_bg_grad_opa(_scrim, sleep ? LV_OPA_TRANSP : LV_OPA_90, 0);
     lv_obj_set_style_opa(_rim,   sleep ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-    lv_obj_set_style_text_font(_time, SN_FONT_NUM_L, 0);
-    lv_obj_set_style_opa(_photo, LV_OPA_COVER, 0);
-    lv_obj_align(_time, LV_ALIGN_CENTER, 0, kTimeY);
-    show_joy(joy);
-}
 
-/*
- * 忆的刻度环：一张照片一颗。
- *
- * 刻度只铺 300°，剩下 60° 空着 —— 那是还没发生的好日子。
- * 这一条不是装饰：一条铺满整圈的进度环暗示的是终点，而这一页要说的是
- * 「又多了一个好日子」。加照片只增不减，环只会越来越密。
- */
-void AppGaze::build_joy()
-{
-    _joy_ring = ui::ticks(_stage, R_RIM, photo::count() > 0 ? photo::count() : 1,
-                          9, 3, BRONZE_D);
-    lv_obj_add_flag(_joy_ring, LV_OBJ_FLAG_HIDDEN);
-
-    _joy_cap = ui::text(_stage, "", SN_FONT_CJK_L, SILK);
-    // 弦区在 center+139，caption 必须让开，否则两行字叠在一起
-    lv_obj_align(_joy_cap, LV_ALIGN_CENTER, 0, 96);
-    lv_obj_add_flag(_joy_cap, LV_OBJ_FLAG_HIDDEN);
-}
-
-void AppGaze::show_joy(bool on)
-{
-    if (!_joy_ring || !_joy_cap) return;
-    if (!on) {
-        lv_obj_add_flag(_joy_ring, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(_joy_cap, LV_OBJ_FLAG_HIDDEN);
-        return;
+    if (_layout == 2) {
+        // 大字：照片退成背景，数字上移到视觉中心偏下
+        lv_obj_set_style_text_font(_time, SN_FONT_NUM_XL, 0);
+        lv_obj_align(_time, LV_ALIGN_CENTER, 0, 84);
+        lv_obj_set_style_opa(_photo, LV_OPA_70, 0);
+    } else {
+        lv_obj_set_style_text_font(_time, SN_FONT_NUM_L, 0);
+        lv_obj_align(_time, LV_ALIGN_CENTER, 0, 118);
+        lv_obj_set_style_opa(_photo, LV_OPA_COVER, 0);
     }
-    lv_obj_remove_flag(_joy_ring, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(_joy_cap, LV_OBJ_FLAG_HIDDEN);
-    ui::ticks_reset_color(_joy_ring, BRONZE_D);
-    ui::tick_set_color(_joy_ring, _index, SILK);
-    lv_label_set_text(_joy_cap, photo::caption_of(_index));
-    // 大字写日子，弦区写日期 —— 跟预览里的层次一致
-    lv_label_set_text(_chord, photo::date_of(_index));
-    lv_obj_set_style_text_color(_chord, c(BRONZE_D), 0);
 }
 
 // 分钟进度：一圈走满即一小时。跟着外圈那颗点一起读
@@ -4163,14 +3425,14 @@ void AppGaze::tick_photo(uint32_t now)
     const float br = std::sin(2 * kPi * sec * kBreathBpm / 60.0f);
     const int shift = static_cast<int>(br * kBreathPx);
     for (int i = 0; i < kVignetteRings; i++) {
-        const int r = vig_radius(i, shift, _vig_inner);
+        const int r = vig_radius(i, shift);
         lv_obj_set_size(_vig[i], r * 2 + 3, r * 2 + 3);
         lv_obj_center(_vig[i]);
     }
 
     // 时间层朝倾斜的同方向轻移，与照片反向，视差才成立
     const int tx = static_cast<int>(_tilt_x * kTiltText);
-    lv_obj_align(_time, LV_ALIGN_CENTER, tx, kTimeY);
+    lv_obj_align(_time, LV_ALIGN_CENTER, tx, _layout == 1 ? 84 : 118);
 }
 
 void AppGaze::tick_dot(uint32_t now)
@@ -4233,9 +3495,6 @@ void AppGaze::swap_photo()
     _cur_dsc  = dsc;
     _index    = next;
     _t_swap   = GetHAL().millis();
-    // 新图可能是另一种形态，晕影内缘跟着换
-    _vig_inner = photo::is_disc(_index) ? VIG_INNER_DISC : VIG_INNER_PORTRAIT;
-    if (_layout == 2) show_joy(true);   // 忆：换图时刻度和文案跟着走
 
     // 用定时器收尾，不要阻塞等待
     lv_timer_t* tm = lv_timer_create([](lv_timer_t* timer) {
@@ -4266,9 +3525,11 @@ void AppGaze::onRunning()
     auto& hal = GetHAL();
     const uint32_t now = hal.millis();
 
-    // 有请求时直接把守推到前台，不是 close 回 launcher ——
-    // 那样用户还得自己去点开守，物理批准的主路径就断了
-    if (sinan::route::yield_to_ward_if_needed()) return;
+    // Ward 有请求时立刻让位。待机页再好看也不能挡住一个等着批准的请求
+    if (State::get().snapshot().ble.has_prompt) {
+        close();
+        return;
+    }
 
     hal.updateImuData();
     const auto& imu = hal.getImuData();
@@ -4335,9 +3596,7 @@ void AppGaze::onClose()
 
     LvglLockGuard lock;
     if (_stage) lv_obj_delete(_stage);
-    ui::root_release();
     _stage = _photo = _photo_next = _hint = _rim = _scrim = _time = _date = _dot = nullptr;
-    _joy_ring = _joy_cap = nullptr;
     _vig.fill(nullptr);
     _trail.fill(nullptr);
 
@@ -4360,7 +3619,6 @@ void AppGaze::onClose()
 #include <sinan/state.h>
 #include <mooncake.h>
 #include <lvgl.h>
-#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -4386,7 +3644,6 @@ private:
     lv_obj_t* _clip   = nullptr;   // 裁剪容器，高度即长按进度
     lv_obj_t* _fill   = nullptr;   // 同一张图，按状态色填
     lv_obj_t* _chord  = nullptr;
-    lv_obj_t* _passkey = nullptr;   // 配对页的六位码
 
     int _face             = 0;
     bool _grave           = false;
@@ -4398,7 +3655,6 @@ private:
     void apply_pending(const sinan::Snapshot& s);
     void apply_settled(bool approved);
     void handle_keys(const sinan::Snapshot& s);
-    void apply_pairing(uint32_t code);
     void build_glyph();
     void set_glyph(bool visible, float fill, uint32_t hue);
 };
@@ -4427,7 +3683,6 @@ private:
 #include <sinan/state.h>
 #include <sinan/bridge_ble.h>
 #include <sinan/danger.h>
-#include <sinan/route.h>
 #include <hal/hal.h>
 #include <mooncake_log.h>
 #include <cstdio>
@@ -4444,7 +3699,7 @@ namespace {
 // 让它回到静默 —— 超时替用户做决定是不可接受的
 constexpr uint32_t kPromptWindowMs = 90000;
 
-enum class Face { Quiet, Pending, Settled, Pairing };
+enum class Face { Quiet, Pending, Settled };
 
 }  // namespace
 
@@ -4466,8 +3721,8 @@ void AppWard::onOpen()
     _settled_at = 0;
 
     LvglLockGuard lock;
-    ui::root_acquire();   // 必须在持锁状态下调，见 precession.h 的锁契约
-    _stage = ui::stage(ui::precession_root());
+    lv_obj_t* root = ui::precession_root();
+    _stage = ui::stage(root);
 
     // Rim：唯一一件两米外看得清的东西
     _rim = ui::arc(_stage, {R_RIM, W_RIM, INDIGO, LACQUER, true}, 0, 40);
@@ -4494,11 +3749,6 @@ void AppWard::onOpen()
     lv_obj_center(_needle);
 
     build_glyph();
-    // 配对码：DisplayOnly 配对时唯一能让人完成配对的东西
-    _passkey = ui::text(_stage, "", SN_FONT_NUM_XL, SILK);
-    lv_obj_center(_passkey);
-    lv_obj_add_flag(_passkey, LV_OBJ_FLAG_HIDDEN);
-
     _chord = ui::chord(_stage, "");
 
     apply_quiet();
@@ -4522,9 +3772,7 @@ void AppWard::build_glyph()
     lv_obj_center(_ghost);
     lv_obj_set_style_image_recolor(_ghost, c(BRONZE_D), 0);
     lv_obj_set_style_image_recolor_opa(_ghost, LV_OPA_COVER, 0);
-    // 40% 而不是 26%：静默态屏幕亮度只有 25%，两者一乘就几乎看不见了。
-    // 这个值要在真机上按环境光复核
-    lv_obj_set_style_opa(_ghost, 102, 0);          // 40%
+    lv_obj_set_style_opa(_ghost, 66, 0);           // 26%
     lv_obj_add_flag(_ghost, LV_OBJ_FLAG_HIDDEN);
 
     _clip = lv_obj_create(_stage);
@@ -4569,7 +3817,6 @@ void AppWard::apply_quiet()
 {
     _face = static_cast<int>(Face::Quiet);
     ui::set_luma(ui::Luma::Quiet);
-    lv_obj_add_flag(_passkey, LV_OBJ_FLAG_HIDDEN);
 
     ui::arc_set_color(_rim, INDIGO);
     ui::arc_animate_to(_rim, 0, 40, T_STATE);
@@ -4584,41 +3831,11 @@ void AppWard::apply_quiet()
     set_glyph(true, 0.0f, BRONZE_D);
 }
 
-/*
- * 配对页。macOS 弹窗要你输一个六位码，而这台设备平时不接串口 ——
- * 码不上屏就配不上对，守整条线是死的。所以它优先级高于一切其他形态。
- */
-void AppWard::apply_pairing(uint32_t code)
-{
-    _face = static_cast<int>(Face::Pairing);
-    ui::set_luma(ui::Luma::Alert);
-
-    ui::stop_breathe(_rim);
-    ui::arc_set_color(_rim, INDIGO);
-    ui::arc_set_range(_rim, 0, 359.9f);
-    ui::ticks_reset_color(_orbit, LACQUER);
-    set_glyph(false, 0.0f, 0);
-
-    lv_obj_add_flag(_needle, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(_tool, "");
-    lv_label_set_text(_hint, "");
-    lv_label_set_text(_reason, "");
-
-    char buf[8];
-    std::snprintf(buf, sizeof(buf), "%06u", static_cast<unsigned>(code % 1000000));
-    lv_obj_remove_flag(_passkey, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(_passkey, buf);
-
-    lv_label_set_text(_chord, "pair on Mac");
-    lv_obj_set_style_text_color(_chord, c(INDIGO), 0);
-}
-
 void AppWard::apply_pending(const Snapshot& s)
 {
     _face = static_cast<int>(Face::Pending);
     _shown_id = s.ble.prompt_id;
     ui::set_luma(ui::Luma::Alert);
-    lv_obj_add_flag(_passkey, LV_OBJ_FLAG_HIDDEN);
 
     const Risk risk = assess(s.ble.prompt_tool, s.ble.prompt_hint);
     _grave = (risk == Risk::Grave);
@@ -4661,14 +3878,9 @@ void AppWard::apply_settled(bool approved)
     _settled_at = GetHAL().millis();
     _shown_id.clear();
 
-    lv_obj_add_flag(_passkey, LV_OBJ_FLAG_HIDDEN);
     ui::stop_breathe(_rim);
-    // 从 12 点向两侧张开。bloom 现在真的会用 from_deg
     ui::bloom(_rim, 0, approved ? MALACHITE : CINNABAR, T_STATE);
     ui::ticks_reset_color(_orbit, approved ? MALACHITE : CINNABAR);
-    // 批准的终态是团团被石绿填满 —— 跟长按过程的最后一帧接上，
-    // 手指松开时画面不跳。拒绝就不留他，直接朱砂弧
-    set_glyph(approved, 1.0f, MALACHITE);
 
     lv_label_set_text(_tool, approved ? "ALLOWED" : "DENIED");
     lv_obj_set_style_text_color(_tool, c(approved ? MALACHITE : CINNABAR), 0);
@@ -4690,31 +3902,11 @@ void AppWard::onRunning()
     const uint32_t now = GetHAL().millis();
     const auto s = State::get().snapshot();
 
-    // 按键状态每帧都要推进。早期版本只在 handle_keys 里推，
-    // 其他形态下 wasClicked 的边沿会攒着，回到待决时凭空触发一次
-    GetHAL().updateButtonStates();
-
     LvglLockGuard lock;
-
-    // 配对压倒一切：配不上对，后面所有形态都没有意义
-    if (s.ble.passkey != 0) {
-        if (_face != static_cast<int>(Face::Pairing)) apply_pairing(s.ble.passkey);
-        return;
-    }
-    if (_face == static_cast<int>(Face::Pairing)) {
-        // 配对有结果了。当初是被配对拉过来的，就回待机页去
-        apply_quiet();
-        sinan::route::return_home_if_auto();
-        return;
-    }
 
     // 落定态只停留一瞬，然后自己退回静默
     if (_face == static_cast<int>(Face::Settled)) {
-        if (now - _settled_at > T_STATE + 700) {
-            apply_quiet();
-            // 当初是被请求自动拉起来的，处理完就回待机页去
-            sinan::route::return_home_if_auto();
-        }
+        if (now - _settled_at > T_STATE + 700) apply_quiet();
         return;
     }
 
@@ -4759,6 +3951,7 @@ void AppWard::onRunning()
 void AppWard::handle_keys(const Snapshot& s)
 {
     auto& hal = GetHAL();
+    hal.updateButtonStates();
 
     if (hal.btnB.wasClicked()) {
         if (ble::send_permission(s.ble.prompt_id, ble::Decision::Deny)) apply_settled(false);
@@ -4810,8 +4003,7 @@ void AppWard::onClose()
     // 一个都不能漏。mooncake 会复用实例，残留指针会指向已销毁对象
     if (_stage) lv_obj_delete(_stage);
     _stage = _rim = _orbit = _tool = _hint = _reason = _needle = _chord = nullptr;
-    _passkey = _ghost = _clip = _fill = nullptr;
-    ui::root_release();
+    _ghost = _clip = _fill = nullptr;
     ui::set_luma(ui::Luma::Normal);
 }
 ```
@@ -4828,7 +4020,6 @@ void AppWard::onClose()
 #include <apps/common/key_manager/key_manager.h>
 #include <mooncake.h>
 #include <lvgl.h>
-#include <cstdint>
 #include <array>
 #include <memory>
 
@@ -4849,7 +4040,6 @@ private:
     std::array<lv_obj_t*, kMaxSeg> _seg{};
     std::array<lv_obj_t*, kMaxSeg> _seg_bg{};
     std::array<lv_obj_t*, kMaxSeg> _seg_label{};
-    std::array<bool, kMaxSeg> _breathing{};   // 呼吸的边沿状态
     lv_obj_t* _focus_pct  = nullptr;
     lv_obj_t* _focus_name = nullptr;
     lv_obj_t* _chord      = nullptr;
@@ -4879,7 +4069,6 @@ private:
 #include <sinan/ring.h>
 #include <sinan/precession.h>
 #include <sinan/state.h>
-#include <sinan/route.h>
 #include <hal/hal.h>
 #include <mooncake_log.h>
 #include <cstdio>
@@ -4925,8 +4114,6 @@ void AppFleet::onOpen()
     _focus = 0;
 
     LvglLockGuard lock;
-    ui::root_acquire();   // 与 onClose 的 root_release 成对，漏了会全屏黑
-
     _stage = ui::stage(ui::precession_root());
 
     // Rim 只做一件事：数据新鲜度。陈旧就整圈转靛青
@@ -4983,16 +4170,11 @@ void AppFleet::rebuild(const FleetState& f)
                                     c(i == _focus ? SILK : BRONZE_D), 0);
         ui::place_polar(_seg_label[i], R_ORBIT_IN - 22, (start + full) / 2);
 
-        /*
-         * 额度低于一成时让这一段呼吸。这是唯一允许的"催促"。
-         * 只在进入/离开低额度的那一下动手 —— rebuild 每秒跑一次，
-         * 无脑重调会把动画从头重启，呼吸永远走不完一拍，看起来是抽搐
-         */
-        const bool low = (w.quota < 0.10f && w.state != WorkerState::Down);
-        if (low != _breathing[i]) {
-            _breathing[i] = low;
-            if (low) ui::breathe(_seg[i], T_BREATH, 80, 255);
-            else ui::stop_breathe(_seg[i]);
+        // 额度低于一成时让这一段呼吸。这是唯一允许的"催促"
+        if (w.quota < 0.10f && w.state != WorkerState::Down) {
+            ui::breathe(_seg[i], T_BREATH, 80, 255);
+        } else {
+            ui::stop_breathe(_seg[i]);
         }
     }
 }
@@ -5038,7 +4220,6 @@ void AppFleet::onRunning()
         close();
         return;
     }
-    if (sinan::route::yield_to_ward_if_needed()) return;
 
     auto& hal = GetHAL();
     hal.updateButtonStates();
@@ -5066,12 +4247,10 @@ void AppFleet::onClose()
     _key.reset();
     LvglLockGuard lock;
     if (_stage) lv_obj_delete(_stage);
-    ui::root_release();
     _stage = _rim = _focus_pct = _focus_name = _chord = nullptr;
     _seg.fill(nullptr);
     _seg_bg.fill(nullptr);
     _seg_label.fill(nullptr);
-    _breathing.fill(false);
 }
 ```
 
@@ -5087,7 +4266,6 @@ void AppFleet::onClose()
 #include <apps/common/key_manager/key_manager.h>
 #include <mooncake.h>
 #include <lvgl.h>
-#include <cstdint>
 #include <memory>
 
 class AppAlmanac : public mooncake::AppAbility {
@@ -5134,7 +4312,6 @@ private:
 #include <sinan/ring.h>
 #include <sinan/precession.h>
 #include <sinan/state.h>
-#include <sinan/route.h>
 #include <hal/hal.h>
 #include <mooncake_log.h>
 #include <cstdio>
@@ -5170,8 +4347,6 @@ void AppAlmanac::onOpen()
     _dial = 0;
 
     LvglLockGuard lock;
-    ui::root_acquire();   // 与 onClose 的 root_release 成对，漏了会全屏黑
-
     _stage = ui::stage(ui::precession_root());
 
     _rim   = ui::arc(_stage, {R_RIM, W_RIM, BRONZE, LACQUER, true}, 0, 359.9f);
@@ -5219,8 +4394,7 @@ void AppAlmanac::draw_huangli()
     uint32_t hue = BRONZE;
     uint32_t period = T_BREATH * 2;
     if (t == "up")        { hue = MALACHITE; period = T_BREATH * 3; }
-    // 琥珀而不是朱砂：状态偏低值得注意，但它不是危险
-    else if (t == "down") { hue = AMBER; period = T_BREATH; }
+    else if (t == "down") { hue = CINNABAR;  period = T_BREATH; }
 
     ui::arc_set_color(_rim, hue);
     ui::arc_set_range(_rim, 0, 359.9f);
@@ -5269,7 +4443,6 @@ void AppAlmanac::draw_yearring()
     lv_label_set_text(_sub, s.almanac.ring_tag.c_str());
     lv_obj_set_style_text_font(_sub, SN_FONT_CJK_M, 0);
 
-    // 只说今天和年进度。转动翻任意一天还没做，界面上就别吹
     char c1[32];
     std::snprintf(c1, sizeof(c1), "day %d of %d", doy, 366);
     lv_label_set_text(_chord, c1);
@@ -5296,8 +4469,6 @@ void AppAlmanac::onRunning()
         return;
     }
 
-    if (sinan::route::yield_to_ward_if_needed()) return;
-
     auto& hal = GetHAL();
     hal.updateButtonStates();
 
@@ -5320,7 +4491,6 @@ void AppAlmanac::onClose()
     _key.reset();
     LvglLockGuard lock;
     if (_stage) lv_obj_delete(_stage);
-    ui::root_release();
     _stage = _rim = _wheel = _big = _sub = _chord = nullptr;
 }
 ```
@@ -5337,7 +4507,6 @@ void AppAlmanac::onClose()
 #include <apps/common/key_manager/key_manager.h>
 #include <mooncake.h>
 #include <lvgl.h>
-#include <cstdint>
 #include <array>
 #include <memory>
 
@@ -5362,13 +4531,12 @@ private:
     lv_obj_t* _text  = nullptr;
     lv_obj_t* _chord = nullptr;
 
-    bool _recording      = false;
-    uint32_t _rec_start  = 0;
-    uint32_t _wait_start = 0;   // 松手之后开始等结果的时刻
-    int _face            = 0;   // 当前画的是哪一态，避免每帧重建
-    float _spin          = 0.0f;
+    bool _recording     = false;
+    uint32_t _rec_start = 0;
+    int _phase          = 0;
+    float _spin         = 0.0f;
 
-    void set_face(int f, const char* line, uint32_t hue);
+    void set_phase(int p);
     void draw_levels();
 };
 ```
@@ -5389,7 +4557,6 @@ private:
 #include <sinan/ring.h>
 #include <sinan/precession.h>
 #include <sinan/state.h>
-#include <sinan/route.h>
 #include <sinan/voice.h>
 #include <hal/hal.h>
 #include <mooncake_log.h>
@@ -5402,13 +4569,9 @@ using namespace sinan::design;
 namespace ui = sinan::ui;
 
 namespace {
-constexpr uint32_t kMaxRecMs  = 12000;   // 说太久转写会慢到不像话
-constexpr uint32_t kWaitMaxMs = 120000;  // 等结果的上限。CLI 跑长任务是常事
+constexpr uint32_t kMaxRecMs = 12000;  // 说太久转写会慢到不像话
 constexpr int kBarMin = 6;
 constexpr int kBarMax = 46;
-
-// 画面形态。跟 VoicePhase 不是一一对应 —— UI 只关心"看起来该是哪样"
-enum Face { FaceIdle = 0, FaceRec, FaceWait, FaceSpeak, FaceError };
 }  // namespace
 
 AppEcho::AppEcho() { setAppInfo().name = "Echo"; }
@@ -5421,8 +4584,6 @@ void AppEcho::onOpen()
     _recording = false;
 
     LvglLockGuard lock;
-    ui::root_acquire();   // 与 onClose 的 root_release 成对，漏了会全屏黑
-
     _stage = ui::stage(ui::precession_root());
     _rim   = ui::arc(_stage, {R_RIM, 4, INDIGO, INK, true}, 0, 359.9f);
 
@@ -5448,61 +4609,41 @@ void AppEcho::onOpen()
     lv_obj_align(_text, LV_ALIGN_CENTER, 0, 0);
 
     _chord = ui::chord(_stage, "hold A to speak");
-    _face = -1;
-    set_face(FaceIdle, "hold A to speak", BRONZE_D);
+    set_phase(0);
 }
 
-/*
- * 只在形态真的变了的时候重画。弦区那行字每帧都可能不同（倒计时），
- * 所以 line 单独更新，不触发整套重建
- */
-void AppEcho::set_face(int f, const char* line, uint32_t hue)
+void AppEcho::set_phase(int p)
 {
-    if (line) {
-        lv_label_set_text(_chord, line);
-        lv_obj_set_style_text_color(_chord, c(hue), 0);
-    }
-    if (f == _face) return;
-    _face = f;
-
-    switch (f) {
-        case FaceIdle:
+    _phase = p;
+    switch (p) {
+        case 0:  // idle
             ui::set_luma(ui::Luma::Quiet);
             ui::arc_set_color(_rim, INDIGO);
             ui::arc_set_range(_rim, 0, 359.9f);
             ui::breathe(_rim, T_BREATH * 2, 30, 120);
             lv_obj_clear_flag(_glyph, LV_OBJ_FLAG_HIDDEN);
             lv_label_set_text(_text, "");
+            lv_label_set_text(_chord, "hold A to speak");
             break;
-        case FaceRec:
+        case 1:  // recording
             ui::set_luma(ui::Luma::Alert);
             ui::stop_breathe(_rim);
             ui::arc_set_color(_rim, MALACHITE);
             lv_obj_add_flag(_glyph, LV_OBJ_FLAG_HIDDEN);
             lv_label_set_text(_text, "");
+            lv_label_set_text(_chord, "listening");
             GetHAL().vibrate(50, 80);
             break;
-        case FaceWait:
+        case 2:  // uploading / thinking
             ui::stop_breathe(_rim);
             ui::arc_set_color(_rim, AMBER);
             lv_obj_clear_flag(_glyph, LV_OBJ_FLAG_HIDDEN);
-            // 松手的这一下要有反馈 —— 用户需要知道"已经发出去了"
-            GetHAL().vibrate(40, 70);
+            lv_label_set_text(_chord, "thinking");
             break;
-        case FaceSpeak:
-            ui::stop_breathe(_rim);
+        case 3:  // speaking
             ui::arc_set_color(_rim, SILK);
             ui::arc_set_range(_rim, 0, 359.9f);
-            break;
-        case FaceError:
-            // 靛青而不是朱砂：没链路、没听清都不是危险，是"什么都没发生"。
-            // 朱砂只留给守那一页的不可逆操作 —— 用滥了它就吓不住人了
-            ui::stop_breathe(_rim);
-            ui::arc_set_color(_rim, INDIGO);
-            ui::arc_set_range(_rim, 0, 359.9f);
-            lv_obj_clear_flag(_glyph, LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(_text, "");
-            GetHAL().vibrate(120, 80);
+            lv_label_set_text(_chord, "");
             break;
         default:
             break;
@@ -5533,106 +4674,55 @@ void AppEcho::onRunning()
         close();
         return;
     }
-    if (!_recording && sinan::route::yield_to_ward_if_needed()) return;
 
     auto& hal = GetHAL();
     hal.updateButtonStates();
     const uint32_t now = hal.millis();
-    const auto s = State::get().snapshot();
 
     LvglLockGuard lock;
 
-    /* ---------- 录音中 ---------- */
-    if (!_recording && hal.btnA.isPressed() && !voice::busy()) {
+    // 按下开录，松开就发。按住说话比"点一下开始再点一下结束"少一次误操作
+    if (!_recording && hal.btnA.isPressed()) {
         _recording = true;
         _rec_start = now;
         voice::begin();
-        set_face(FaceRec, "listening", MALACHITE);
+        set_phase(1);
     }
 
     if (_recording) {
-        // begin() 可能因为没链路直接判错，这时不该继续画录音态
-        if (s.voice.phase == VoicePhase::Error) {
-            _recording = false;
-            set_face(FaceError, s.voice.note.c_str(), INDIGO);
-            _wait_start = now;
-            return;
-        }
         draw_levels();
         const uint32_t used = now - _rec_start;
         ui::arc_set_progress(_rim, 1.0f - std::min(1.0f, static_cast<float>(used) / kMaxRecMs));
 
-        // 松开即发。没有第二步确认 —— 说完话还要再按一下，这功能就没人用了
         if (!hal.btnA.isPressed() || used > kMaxRecMs) {
-            _recording  = false;
-            _wait_start = now;
+            _recording = false;
             voice::end();
-            set_face(FaceWait, "sent", AMBER);
+            set_phase(2);
         }
         return;
     }
 
-    /* ---------- 等结果 ---------- */
-    if (_face == FaceWait || _face == FaceSpeak) {
-        // B 键随时复位，不必等超时
-        if (hal.btnB.wasClicked()) {
-            set_face(FaceIdle, "hold A to speak", BRONZE_D);
-            ui::set_luma(ui::Luma::Normal);
-            return;
-        }
+    // 等待期间 Rim 跑一段短弧转圈。转圈就够了，不需要文字说"加载中"
+    const auto s = State::get().snapshot();
+    if (_phase == 2) {
         _spin += 3.0f;
         if (_spin >= 360.0f) _spin -= 360.0f;
+        ui::arc_set_range(_rim, _spin, _spin + 50.0f);
 
-        switch (s.voice.phase) {
-            case VoicePhase::Sending:
-                ui::arc_set_range(_rim, _spin, _spin + 50.0f);
-                set_face(FaceWait, "sent", AMBER);
-                break;
-            case VoicePhase::Transcribing:
-                ui::arc_set_range(_rim, _spin, _spin + 50.0f);
-                set_face(FaceWait, "transcribing", AMBER);
-                break;
-            case VoicePhase::Thinking:
-                ui::arc_set_range(_rim, _spin, _spin + 50.0f);
-                if (!s.voice.heard.empty()) lv_label_set_text(_text, s.voice.heard.c_str());
-                set_face(FaceWait, "running", AMBER);
-                break;
-            case VoicePhase::Speaking:
-                lv_label_set_text(_text, s.voice.reply.c_str());
-                set_face(FaceSpeak, "", SILK);
-                break;
-            case VoicePhase::Error:
-                set_face(FaceError, s.voice.note.c_str(), INDIGO);
-                _wait_start = now;
-                break;
-            case VoicePhase::Idle:
-                if (!s.voice.reply.empty()) {
-                    lv_label_set_text(_text, s.voice.reply.c_str());
-                    set_face(FaceSpeak, "hold A to speak", BRONZE_D);
-                    ui::set_luma(ui::Luma::Normal);
-                    // 已经播完了，退出等待计时。不清零的话 120 秒后
-                    // 一次成功的对话会被超时判定改写成 timed out
-                    _wait_start = 0;
-                }
-                break;
-            default:
-                break;
-        }
-
-        if (_wait_start && now - _wait_start > kWaitMaxMs) {
-            set_face(FaceError, "timed out", INDIGO);
-            _wait_start = now;
-        }
+        if (!s.voice.heard.empty()) lv_label_set_text(_text, s.voice.heard.c_str());
+        if (s.voice.phase == VoicePhase::Speaking) set_phase(3);
+        else if (s.voice.phase == VoicePhase::Idle && !s.voice.reply.empty()) set_phase(3);
         return;
     }
 
-    /* ---------- 错误：停留几秒自己退回 ---------- */
-    if (_face == FaceError) {
-        if (now - _wait_start > 4000 || hal.btnB.wasClicked()) {
-            set_face(FaceIdle, "hold A to speak", BRONZE_D);
+    if (_phase == 3) {
+        lv_label_set_text(_text, s.voice.reply.c_str());
+        if (s.voice.phase == VoicePhase::Idle) {
+            // 结果读完了，但文字留在屏上，直到下一次说话
+            lv_label_set_text(_chord, "hold A to speak");
             ui::set_luma(ui::Luma::Normal);
+            _phase = 4;
         }
-        return;
     }
 }
 
@@ -5644,7 +4734,6 @@ void AppEcho::onClose()
 
     LvglLockGuard lock;
     if (_stage) lv_obj_delete(_stage);
-    ui::root_release();
     _stage = _rim = _glyph = _text = _chord = nullptr;
     _bars.fill(nullptr);
     ui::set_luma(ui::Luma::Normal);
@@ -5692,7 +4781,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import ipaddress
 import json
 import logging
 import os
@@ -5703,10 +4791,7 @@ import subprocess
 import sys
 import threading
 import time
-try:
-    import tomllib                      # 3.11+
-except ModuleNotFoundError:             # 3.10 及以下
-    import tomli as tomllib             # type: ignore
+import tomllib
 import wave
 from datetime import date, datetime
 from pathlib import Path
@@ -5714,18 +4799,6 @@ from pathlib import Path
 LOG = logging.getLogger("sinand")
 HERE = Path(__file__).resolve().parent
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC 6455 magic
-
-# ---------------------------------------------------------------- 工具
-
-
-def is_private(addr: str) -> bool:
-    """RFC1918 + 回环。用标准库判，别自己切字符串。"""
-    try:
-        ip = ipaddress.ip_address(addr)
-    except ValueError:
-        return False
-    return ip.is_private or ip.is_loopback or ip.is_link_local
-
 
 # ---------------------------------------------------------------- 配置
 
@@ -5998,28 +5071,21 @@ class VoiceSession:
             return "agent timed out"
 
     def synth(self, text: str) -> str:
-        """macOS 自带 say 就够用，不用装 TTS。转 16k 单声道 s16le 回传。
-
-        走 WAV 而不是 CAF：CAF 的头不是定长，早期版本硬跳 4096 字节，
-        运气不好就把音频前半秒切掉、或者把头当成采样播出一声爆音。
-        """
+        """macOS 自带 say 就够用，不用装 TTS。转 16k 单声道 s16le 回传。"""
         if not text:
             return ""
         aiff = Path("/tmp/sinan_tts.aiff")
-        wav = Path("/tmp/sinan_tts.wav")
+        raw = Path("/tmp/sinan_tts.raw")
         voice = self.cfg["voice"].get("tts_voice", "Tingting")
         try:
             subprocess.run(["say", "-v", voice, "-o", str(aiff), text],
                            check=True, timeout=60)
             subprocess.run(
-                ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
-                 str(aiff), str(wav)], check=True, timeout=60)
-            with wave.open(str(wav), "rb") as w:
-                if w.getnchannels() != 1 or w.getsampwidth() != 2:
-                    LOG.warning("unexpected tts format, skipping audio")
-                    return ""
-                pcm = w.readframes(w.getnframes())
-            return base64.b64encode(pcm).decode()
+                ["afconvert", "-f", "caff", "-d", "LEI16@16000", "-c", "1",
+                 str(aiff), str(raw)], check=True, timeout=60)
+            data = raw.read_bytes()
+            # 跳过 caff 头。用 wave 转一道更稳，但这样少一个临时文件
+            return base64.b64encode(data[4096:]).decode()
         except Exception as e:
             LOG.warning("tts failed: %s", e)
             return ""
@@ -6115,33 +5181,13 @@ class Server:
             LOG.info("device disconnected")
 
     def _finish_voice(self, conn: WSConn, session: VoiceSession) -> None:
-        """松手即发：设备一发 asr_end 就走完整条链，不等第二次确认。
-
-        每一步都回一帧 voice_status，设备弦区才能显示 transcribing / running ——
-        否则用户面对的是一个转圈的环，不知道它卡在哪一步、还要不要等。
-        """
-        auto = self.cfg.get("voice", {}).get("auto_send", True)
-
-        conn.send_json({"t": "voice_status", "phase": "transcribing"})
         heard = session.transcribe()
         conn.send_json({"t": "asr_result", "text": heard})
         if not heard:
-            # 设备端收到空 asr_result 会自己判错，这里不再多发一帧
+            conn.send_json({"t": "say", "text": "didn't catch that", "pcm": ""})
             return
-
         LOG.info("heard: %s", heard)
-        if not auto:
-            # 只有显式关掉 auto_send 才停在这一步等确认
-            conn.send_json({"t": "voice_status", "phase": "await_confirm"})
-            return
-
-        conn.send_json({"t": "voice_status", "phase": "running"})
-        try:
-            reply = session.answer(heard)
-        except Exception as e:
-            LOG.warning("agent failed: %s", e)
-            conn.send_json({"t": "voice_status", "phase": "error", "note": "agent failed"})
-            return
+        reply = session.answer(heard)
         conn.send_json({"t": "say", "text": reply, "pcm": session.synth(reply)})
 
     def serve(self) -> None:
@@ -6158,10 +5204,9 @@ class Server:
 
         while True:
             sock, addr = srv.accept()
-            # 只接内网。这台机器上跑着你的 CLI，不该对公网开口。
-            # 注意 172 段：私网只有 172.16-172.31，172.32 是公网地址，
-            # 用 startswith("172.") 会把公网一起放进来
-            if not is_private(addr[0]):
+            # 只接内网。这台机器上跑着你的 CLI，不该对公网开口
+            if not (addr[0].startswith(("10.", "192.168.", "127."))
+                    or addr[0].startswith("172.")):
                 LOG.warning("rejected %s", addr[0])
                 sock.close()
                 continue
@@ -6248,9 +5293,6 @@ source = "~/.sinan/almanac.sh"
 # {wav} 会被替换成录音文件路径，{text} 会被替换成转写结果（已 JSON 转义）。
 
 [voice]
-# 松手即发。设备一松开 A 键就转写并直接执行，不再要求第二次确认。
-# 改成 false 会退回"转写完停下等确认"，交互多一步，一般不要开。
-auto_send = true
 asr_cmd   = "whisper-cli -m ~/models/ggml-large-v3-turbo.bin -f {wav} -l zh --no-timestamps -np 2>/dev/null | tail -1"
 agent_cmd = "claude -p {text} 2>&1 | tail -20"
 agent_timeout = 180
@@ -6329,15 +5371,10 @@ git clone --depth 1 https://github.com/m5stack/M5StopWatch-UserDemo.git "$TMP/up
 
 rsync -a --delete "$TMP/up/main/hal/"    "$ROOT/main/hal/"
 rsync -a          "$TMP/up/main/assets/" "$ROOT/main/assets/"
-# 官方应用一并同步。早期版本只拿 launcher 和 setup，等于把秒表、闹钟、
-# 徽章上传、以及 IMU/麦克风自检全丢了 —— 而这块板出厂就叫 StopWatch。
-# 保留它们不冲突：官方应用画在 lv_screen_active()，司南画在岁差根容器上，
-# 根容器在引用计数归零时是隐藏的。
-for a in common app_launcher app_setup app_stopwatch app_alarm_clock \
-         app_badge app_imu app_fft app_watch_face app_lucky_wheel app_template; do
-  mkdir -p "$ROOT/main/apps/$a"
-  rsync -a --delete "$TMP/up/main/apps/$a/" "$ROOT/main/apps/$a/"
-done
+mkdir -p "$ROOT/main/apps/common" "$ROOT/main/apps/app_launcher" "$ROOT/main/apps/app_setup"
+rsync -a --delete "$TMP/up/main/apps/common/"       "$ROOT/main/apps/common/"
+rsync -a --delete "$TMP/up/main/apps/app_launcher/" "$ROOT/main/apps/app_launcher/"
+rsync -a --delete "$TMP/up/main/apps/app_setup/"    "$ROOT/main/apps/app_setup/"
 cp "$TMP/up/repos.json" "$TMP/up/fetch_repos.py" "$TMP/up/partitions.csv" "$ROOT/"
 [ -d "$TMP/up/patches" ] && rsync -a "$TMP/up/patches/" "$ROOT/patches/"
 
@@ -6513,547 +5550,6 @@ AGENTS.md       给 Codex 的完整上下文，改代码前先读
 ```
 
 
-### `daemon/test_voice_autosend.py`
-
-<!-- FILE: daemon/test_voice_autosend.py -->
-```python
-#!/usr/bin/env python3
-"""
-松手即发的契约自测。不需要设备、不需要 whisper。
-
-    python3 daemon/test_voice_autosend.py
-
-验的是「一次松手 = 一条完整链路」，以及三条不发送的岔路。
-这个契约很容易在后续改动里被无意破坏（比如有人为了"更稳"加一步确认），
-所以它需要一个能跑的测试守着，而不是只写在文档里。
-"""
-from __future__ import annotations
-
-import pathlib
-import sys
-import types
-
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import sinand  # noqa: E402
-
-
-class FakeConn:
-    def __init__(self):
-        self.sent: list[dict] = []
-        self.alive = True
-
-    def send_json(self, obj):
-        self.sent.append(obj)
-
-    def phases(self):
-        return [m.get("phase") for m in self.sent if m.get("t") == "voice_status"]
-
-    def types(self):
-        return [m.get("t") for m in self.sent]
-
-
-def make_server(auto_send=True, heard="今天的号码", reply="0731"):
-    cfg = {
-        "daemon": {"path": ""},
-        "voice": {"auto_send": auto_send, "asr_cmd": "", "agent_cmd": ""},
-    }
-    srv = sinand.Server.__new__(sinand.Server)
-    srv.cfg = cfg
-    session = types.SimpleNamespace(
-        transcribe=lambda: heard,
-        answer=lambda t: reply,
-        synth=lambda t: "",
-    )
-    return srv, session
-
-
-FAILED = []
-
-
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  PASS  {name}")
-    else:
-        print(f"  FAIL  {name}  {detail}")
-        FAILED.append(name)
-
-
-def main() -> int:
-    print("松手即发契约")
-
-    # 1. 正常路径：一次松手走完 transcribing -> asr_result -> running -> say
-    srv, sess = make_server()
-    conn = FakeConn()
-    srv._finish_voice(conn, sess)
-    check("完整链路只需一次松手",
-          conn.types() == ["voice_status", "asr_result", "voice_status", "say"],
-          conn.types())
-    check("状态帧顺序正确", conn.phases() == ["transcribing", "running"], conn.phases())
-    check("没有 await_confirm", "await_confirm" not in conn.phases())
-
-    # 2. 空转写：不往下走，交给设备端判错
-    srv, sess = make_server(heard="")
-    conn = FakeConn()
-    srv._finish_voice(conn, sess)
-    check("空转写不触发 agent", "say" not in conn.types(), conn.types())
-    check("空转写仍回 asr_result", "asr_result" in conn.types())
-
-    # 3. 显式关掉 auto_send 才停下等确认
-    srv, sess = make_server(auto_send=False)
-    conn = FakeConn()
-    srv._finish_voice(conn, sess)
-    check("auto_send=false 时停在 await_confirm",
-          conn.phases() == ["transcribing", "await_confirm"], conn.phases())
-    check("auto_send=false 时不执行", "say" not in conn.types())
-
-    # 4. agent 抛异常要回 error，不能静默吞掉
-    srv, sess = make_server()
-    sess.answer = lambda t: (_ for _ in ()).throw(RuntimeError("boom"))
-    conn = FakeConn()
-    srv._finish_voice(conn, sess)
-    check("agent 失败回 error 帧", "error" in conn.phases(), conn.phases())
-
-    # 5. 配置默认必须是 true
-    cfg_text = (pathlib.Path(__file__).parent / "config.example.toml").read_text()
-    check("config.example.toml 默认 auto_send = true", "auto_send = true" in cfg_text)
-
-    print()
-    if FAILED:
-        print(f"{len(FAILED)} FAILED: {', '.join(FAILED)}")
-        return 1
-    print("ALL PASSED")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-```
-
-
-### `main/sinan/route.cpp`
-
-<!-- FILE: main/sinan/route.cpp -->
-```cpp
-#include "route.h"
-#include "state.h"
-#include <hal/hal.h>
-#include <mooncake.h>
-#include <mooncake_log.h>
-#include <cstring>
-#include <string>
-#include <vector>
-
-namespace sinan::route {
-
-namespace {
-
-constexpr char TAG[] = "sinan.route";
-
-struct Entry {
-    std::string name;
-    int id;
-};
-
-std::vector<Entry> s_apps;
-bool s_auto_opened = false;
-std::string s_home;
-uint32_t s_last_open = 0;   // 上次把守推到前台的时刻
-
-int id_of(const char* name)
-{
-    if (!name || !*name) return -1;
-    for (const auto& e : s_apps) {
-        if (e.name == name) return e.id;
-    }
-    return -1;
-}
-
-}  // namespace
-
-void register_app(const char* name, int id)
-{
-    s_apps.push_back({name, id});
-}
-
-bool open(const char* name)
-{
-    const int id = id_of(name);
-    if (id < 0) return false;
-    if (s_home.empty()) s_home = name;   // 第一个被显式打开的就是开机应用
-    return mooncake::GetMooncake().openApp(id);
-}
-
-bool yield_to_ward_if_needed()
-{
-    const auto s = State::get().snapshot();
-
-    /*
-     * 两件事都要把守推到前台：
-     *   1. 有待决请求
-     *   2. 正在配对（六位码只有守画得出来，看不见码就配不上对）
-     * 用 key 去重，否则每帧都 openApp 一次，动画永远重来。
-     */
-    const bool want = (s.ble.passkey != 0) || s.ble.has_prompt;
-    if (!want) return false;
-
-    const int id = id_of("Ward");
-    if (id < 0) return false;
-
-    /*
-     * 去重用时间窗，不要用 prompt id 做 key。
-     *
-     * 按 key 去重看起来更精确，但会造成死局：用户在请求待决时手动从守退回
-     * launcher 再进望，望调到这里发现 key 没变就直接 return true —— 望每帧
-     * 什么都不做，画面卡住，而守也没被拉起来。
-     *
-     * 而调用方永远只会是非守应用，它还在跑就说明守不在前台，那就该切。
-     * 时间窗只是防止 openApp 尚未生效的那一两帧里重复调用。
-     */
-    const uint32_t now = GetHAL().millis();
-    if (now - s_last_open < 1000) return true;
-
-    s_last_open   = now;
-    s_auto_opened = true;
-    mooncake::GetMooncake().openApp(id);
-    mclog::tagInfo(TAG, "switching to Ward");
-    return true;
-}
-
-void return_home_if_auto()
-{
-    s_last_open = 0;
-    if (!s_auto_opened) return;
-    s_auto_opened = false;
-    const int id = id_of(s_home.empty() ? "Gaze" : s_home.c_str());
-    if (id >= 0) mooncake::GetMooncake().openApp(id);
-}
-
-}  // namespace sinan::route
-```
-
-
-### `main/sinan/route.h`
-
-<!-- FILE: main/sinan/route.h -->
-```cpp
-/*
- * route.h — 前台应用路由。
- *
- * 职责边界：只回答"现在该让哪个应用在前台"，不碰 UI。
- *
- * 存在的理由：有权限请求进来时，用户不应该还要自己去 launcher 里点开守。
- * 望/阵/问/历 在 onRunning 里各自调一次 yield_to_ward_if_needed()，
- * 请求处理完再回到开机应用。
- */
-#pragma once
-
-namespace sinan::route {
-
-// main.cpp 在 installApp 之后登记，id 就是 installApp 的返回值
-void register_app(const char* name, int id);
-
-// 按名字打开。名字不存在或为空则什么都不做，返回 false
-bool open(const char* name);
-
-/*
- * 有待决请求且当前不在守里 -> 打开守，返回 true（调用方应立即 return）。
- * 会记下"这次是自动切过去的"，好在请求处理完之后回得来。
- */
-bool yield_to_ward_if_needed();
-
-// 守在请求处理完后调。只有当初是自动切过来的才回开机应用
-void return_home_if_auto();
-
-}  // namespace sinan::route
-```
-
-
-### `scripts/crops-tuan.json`
-
-<!-- FILE: scripts/crops-tuan.json -->
-```json
-{
- "_comment": "逐张定的构图，不是算出来的。规矩：脸约占圆直径六成，眼睛落在四成高度（正中会显得头重脚轻），背景越少越好——晕影只吃得掉四个角。换照片用 pick_crops.html 重圈，别去调自动检测。",
- "12529.jpeg": {
-  "cx": 1062,
-  "cy": 1060,
-  "r": 545,
-  "mode": "portrait"
- },
- "15693.jpeg": {
-  "cx": 440,
-  "cy": 355,
-  "r": 225,
-  "mode": "portrait"
- },
- "11118.jpeg": {
-  "cx": 1690,
-  "cy": 2008,
-  "r": 1290,
-  "mode": "portrait"
- },
- "13844.jpeg": {
-  "cx": 900,
-  "cy": 600,
-  "r": 215,
-  "mode": "portrait"
- },
- "16112.jpeg": {
-  "cx": 2568,
-  "cy": 1310,
-  "r": 450,
-  "mode": "portrait"
- },
- "12092.jpeg": {
-  "cx": 1333,
-  "cy": 1968,
-  "r": 880,
-  "mode": "portrait"
- },
- "12246.jpeg": {
-  "cx": 2240,
-  "cy": 1258,
-  "r": 300,
-  "mode": "portrait"
- },
- "12494.jpeg": {
-  "cx": 1904,
-  "cy": 1221,
-  "r": 784,
-  "mode": "portrait"
- },
- "12930.jpeg": {
-  "cx": 1030,
-  "cy": 1035,
-  "r": 1000,
-  "mode": "portrait"
- },
- "13575.jpeg": {
-  "cx": 1309,
-  "cy": 2349,
-  "r": 796,
-  "mode": "portrait"
- },
- "13867.jpeg": {
-  "cx": 1136,
-  "cy": 534,
-  "r": 468,
-  "mode": "disc"
- },
- "13869.jpeg": {
-  "cx": 825,
-  "cy": 577,
-  "r": 395,
-  "mode": "portrait"
- },
- "8762.jpeg": {
-  "cx": 1960,
-  "cy": 1718,
-  "r": 523,
-  "mode": "portrait"
- },
- "9154.jpeg": {
-  "cx": 1333,
-  "cy": 2397,
-  "r": 560,
-  "mode": "portrait"
- },
- "IMG_5997.jpeg": {
-  "cx": 1400,
-  "cy": 1829,
-  "r": 747,
-  "mode": "portrait"
- },
- "IMG_8655.jpeg": {
-  "cx": 1579,
-  "cy": 2210,
-  "r": 411,
-  "mode": "portrait"
- }
-}
-```
-
-
-### `scripts/pick_crops.html`
-
-<!-- FILE: scripts/pick_crops.html -->
-```text
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>司南 · 圈主体</title>
-<!--
-  为什么有这个页面：自动圈主体解不了。
-  试过按冷暖分割（木地板也是暖的）、按白毛定位（半径全靠蒙），
-  两套都在四成照片上失手。任意宠物照的主体定位不是颜色启发式能解的问题。
-
-  所以判断交给人，机器只做机械活 —— 跟守那一页是同一个原则。
-  十六张照片十分钟，而且每张都对。
-
-  用法：浏览器打开本文件 → 拖进照片 → 每张拖一个圈 → 导出 crops.json
-        python3 scripts/prep_photos.py --crops crops.json 照片...
--->
-<style>
-  :root{--ink:#0B0B0C;--panel:#141416;--line:#26262A;--bronze:#C8A96E;
-        --silk:#F2EDE1;--dim:#8A857B;--malachite:#4FA88A;--cinnabar:#D6442F}
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--ink);color:var(--silk);
-       font:400 14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
-  header{padding:20px 24px;border-bottom:1px solid var(--line);
-         display:flex;align-items:center;gap:18px;flex-wrap:wrap;
-         position:sticky;top:0;background:var(--ink);z-index:10}
-  h1{margin:0;font:500 17px/1 inherit;letter-spacing:.16em}
-  .hint{color:var(--dim);font-size:13px;flex:1;min-width:260px}
-  button{background:var(--panel);color:var(--silk);border:1px solid var(--line);
-         border-radius:8px;padding:9px 16px;font:500 13px/1 inherit;cursor:pointer}
-  button:hover{border-color:var(--bronze)}
-  button.go{background:var(--bronze);color:#141210;border-color:var(--bronze)}
-  #drop{margin:24px;padding:56px;border:1px dashed var(--line);border-radius:16px;
-        text-align:center;color:var(--dim)}
-  #drop.over{border-color:var(--bronze);color:var(--silk)}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));
-        gap:22px;padding:24px}
-  .cell{background:var(--panel);border:1px solid var(--line);border-radius:14px;
-        padding:12px;position:relative}
-  .cell canvas{width:100%;display:block;border-radius:8px;cursor:crosshair;touch-action:none}
-  .row{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:12px}
-  .name{color:var(--dim);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-        font-family:ui-monospace,Menlo,monospace}
-  .date{color:var(--bronze);font-family:ui-monospace,Menlo,monospace}
-  .mode{background:transparent;color:var(--dim);border:1px solid var(--line);
-        border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer}
-  .mode.disc{color:var(--malachite);border-color:var(--malachite)}
-  .cell.unset{outline:1px solid var(--cinnabar);outline-offset:-1px}
-  textarea{width:calc(100% - 48px);margin:0 24px 40px;height:180px;background:var(--panel);
-           color:var(--silk);border:1px solid var(--line);border-radius:10px;padding:14px;
-           font:12px/1.5 ui-monospace,Menlo,monospace}
-</style>
-</head>
-<body>
-
-<header>
-  <h1>司南 · 圈主体</h1>
-  <span class="hint">在每张图上<b>按住拖动</b>画一个圈，把团团圈进去。蜷成球的点一下右边切成 disc。</span>
-  <button id="auto">全部套用默认圈</button>
-  <button class="go" id="out">导出 crops.json</button>
-</header>
-
-<div id="drop">把照片拖到这里，或点击选择<input id="file" type="file" multiple accept="image/*" hidden></div>
-<div class="grid" id="grid"></div>
-<textarea id="json" placeholder="导出的 JSON 会出现在这里，存成 crops.json"></textarea>
-
-<script>
-const grid = document.getElementById('grid');
-const drop = document.getElementById('drop');
-const fileIn = document.getElementById('file');
-const items = [];   // {name, img, cx, cy, r, mode, canvas, set}
-
-drop.onclick = () => fileIn.click();
-fileIn.onchange = e => load([...e.target.files]);
-drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
-drop.ondragleave = () => drop.classList.remove('over');
-drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); load([...e.dataTransfer.files]); };
-
-function load(files){
-  files.filter(f => f.type.startsWith('image/')).forEach(f => {
-    const img = new Image();
-    img.onload = () => addCell(f.name, img);
-    img.src = URL.createObjectURL(f);
-  });
-  drop.style.display = 'none';
-}
-
-function addCell(name, img){
-  const cell = document.createElement('div');
-  cell.className = 'cell unset';
-  const cv = document.createElement('canvas');
-  const W = 560, H = Math.round(W * img.height / img.width);
-  cv.width = W; cv.height = H;
-  cell.appendChild(cv);
-
-  const row = document.createElement('div');
-  row.className = 'row';
-  row.innerHTML = `<span class="name">${name}</span><span class="date"></span>`;
-  const modeBtn = document.createElement('button');
-  modeBtn.className = 'mode'; modeBtn.textContent = 'portrait';
-  row.appendChild(modeBtn);
-  cell.appendChild(row);
-  grid.appendChild(cell);
-
-  // 默认给一个居中的保守圈，直接导出也不会是空的
-  const it = { name, img, cx: img.width/2, cy: img.height/2,
-               r: Math.round(Math.min(img.width, img.height) * 0.34),
-               mode: 'portrait', cv, cell, set: false, scale: img.width / W };
-  items.push(it);
-  draw(it);
-
-  modeBtn.onclick = () => {
-    it.mode = it.mode === 'disc' ? 'portrait' : 'disc';
-    modeBtn.textContent = it.mode;
-    modeBtn.classList.toggle('disc', it.mode === 'disc');
-    draw(it);
-  };
-
-  let dragging = false, sx = 0, sy = 0;
-  const pos = e => {
-    const b = cv.getBoundingClientRect();
-    const k = cv.width / b.width;
-    return [(e.clientX - b.left) * k, (e.clientY - b.top) * k];
-  };
-  cv.onpointerdown = e => { cv.setPointerCapture(e.pointerId); dragging = true; [sx, sy] = pos(e); };
-  cv.onpointermove = e => {
-    if (!dragging) return;
-    const [x, y] = pos(e);
-    it.cx = Math.round((sx + x) / 2 * it.scale);
-    it.cy = Math.round((sy + y) / 2 * it.scale);
-    it.r  = Math.round(Math.hypot(x - sx, y - sy) / 2 * it.scale);
-    it.set = true; cell.classList.remove('unset');
-    draw(it);
-  };
-  cv.onpointerup = () => { dragging = false; };
-}
-
-function draw(it){
-  const g = it.cv.getContext('2d');
-  const W = it.cv.width, H = it.cv.height;
-  g.clearRect(0, 0, W, H);
-  g.drawImage(it.img, 0, 0, W, H);
-
-  // 圈外压暗，圈内保持原样 —— 这就是设备上晕影之后的样子
-  g.save();
-  g.beginPath(); g.rect(0, 0, W, H);
-  g.arc(it.cx / it.scale, it.cy / it.scale, it.r / it.scale, 0, Math.PI * 2, true);
-  g.fillStyle = 'rgba(0,0,0,.72)'; g.fill('evenodd');
-  g.restore();
-
-  g.beginPath();
-  g.arc(it.cx / it.scale, it.cy / it.scale, it.r / it.scale, 0, Math.PI * 2);
-  g.strokeStyle = it.mode === 'disc' ? '#4FA88A' : '#C8A96E';
-  g.lineWidth = 2; g.stroke();
-}
-
-document.getElementById('auto').onclick = () => {
-  items.forEach(it => { it.set = true; it.cell.classList.remove('unset'); });
-};
-
-document.getElementById('out').onclick = () => {
-  const o = {};
-  items.forEach(it => { o[it.name] = { cx: it.cx, cy: it.cy, r: it.r, mode: it.mode }; });
-  const txt = JSON.stringify(o, null, 1);
-  document.getElementById('json').value = txt;
-  navigator.clipboard?.writeText(txt);
-  const b = new Blob([txt], {type:'application/json'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(b); a.download = 'crops.json'; a.click();
-};
-</script>
-</body>
-</html>
-```
-
-
 ### `scripts/prep_photos.py`
 
 <!-- FILE: scripts/prep_photos.py -->
@@ -7068,129 +5564,56 @@ prep_photos.py — 把照片处理成设备能直接用的资产。
 输出到 build/tuantuan/，然后把整个文件夹拖到 Claude 桌面端的
 Hardware Buddy 窗口上，照片会经 BLE 流进设备。
 
-日期一律从 EXIF DateTimeOriginal 读，其次认文件名前缀 YYYY-MM 或 YYYY-MM-DD。
-**任何地方都不允许手打日期。** 手打过一次就错过一次（把 2020.10 写成了 2019.05），
-而且错得很难发现——渲染出来的图看着一切正常。
-
 设计前提：团团睡觉时把自己蜷成正圆，而屏幕也是正圆，所以做法不是
 "圆屏里放一张照片"，而是把他抠成一枚悬浮的圆盘。四周是纯黑，
 AMOLED 上黑像素熄灭，于是他没有边缘，像一件实物躺在表壳里。
 
 只需要 pillow + numpy，不需要 ImageMagick，也不需要抠图模型。
 """
-import argparse, json, pathlib, re, sys
-from datetime import date, datetime
+import argparse, json, pathlib, sys
 import numpy as np
-from PIL import ExifTags, Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 SRC = 536          # 设备端画布，比屏幕大 70px，给漂移留余量
 FRAC = 0.72        # 主体直径占画布的比例，四周留黑给晕影
 BUDGET_KB = 1700   # Hardware Buddy 文件夹推送上限 1.8MB，留点余量
 
 
-DATE_RE = re.compile(r'(20\d{2})[-_.]?(\d{2})(?:[-_.]?(\d{2}))?')
-
-
-def photo_date(path: pathlib.Path):
-    """EXIF 优先，文件名兜底。拿不到就返回 None，绝不猜、绝不用文件修改时间
-    （那是下载时间，不是拍摄时间）。"""
-    try:
-        ex = Image.open(path).getexif()
-        sub = ex.get_ifd(0x8769)
-        for k, v in sub.items():
-            if ExifTags.TAGS.get(k) == 'DateTimeOriginal' and v:
-                return datetime.strptime(str(v)[:10], '%Y:%m:%d').date()
-        for k, v in ex.items():
-            if ExifTags.TAGS.get(k) == 'DateTime' and v:
-                return datetime.strptime(str(v)[:10], '%Y:%m:%d').date()
-    except Exception:
-        pass
-    m = DATE_RE.search(path.stem)
-    if m:
-        y, mo, d = m.group(1), m.group(2), m.group(3) or '15'
-        try:
-            return date(int(y), int(mo), int(d))
-        except ValueError:
-            pass
-    return None
-
-
 def find_subject(im):
-    """猜主体的外接圆。**这只是兜底，不要指望它。**
-
-    试过两套判据：按冷暖分割（木地板也是暖的，圈进半个客厅）、
-    按白毛定位（脸和胸的白毛偏离头心，半径全靠蒙）。
-    两套都在四成左右的照片上失手。任意宠物照的主体定位不是颜色启发式
-    能解的问题，别再往里加第三套规则。
-
-    正确做法是 scripts/pick_crops.html：浏览器里拖一个圈，导出 crops.json，
-    用 --crops 喂进来。十六张照片十分钟，而且每张都对。
-    这跟守那一页是同一个原则 —— 判断交给人，机器只做机械活。
-    """
-    small = im.resize((im.width // 6, im.height // 6))
-    a = np.asarray(small).astype(np.int16)
-    lo, hi = a.min(2), a.max(2)
-    blaze = (a.mean(2) > 175) & ((hi - lo) < 30)      # 亮且接近中性 = 白毛
-    m = Image.fromarray((blaze * 255).astype(np.uint8)).filter(ImageFilter.MedianFilter(5))
+    """猜主体的外接圆。毯子/地板通常偏冷，主体偏暖，据此分割。
+    猜不准就用 --center / --radius 手工指定，比调参快。"""
+    a = np.asarray(im.resize((im.width // 4, im.height // 4))).astype(np.int16)
+    R, G, B = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+    warm = (R > B + 10) | ((a.mean(2) > 170) & (G >= R - 6))
+    m = Image.fromarray((warm * 255).astype(np.uint8)).filter(ImageFilter.MedianFilter(5))
     ys, xs = np.nonzero(np.asarray(m) > 127)
-
-    if len(xs) < 150:
-        return im.width // 2, im.height // 2, int(min(im.size) * 0.34)
-
-    cx, cy = xs.mean() * 6, ys.mean() * 6
-    spread = np.percentile(np.hypot(xs * 6 - cx, ys * 6 - cy), 88)
-    r = int(np.clip(spread * 1.9, min(im.size) * 0.16, min(im.size) * 0.52))
-    return int(cx), int(cy), r
+    if len(xs) < 500:
+        return im.width // 2, im.height // 2, min(im.size) // 2
+    cx, cy = xs.mean() * 4, ys.mean() * 4
+    r = np.percentile(np.hypot(xs * 4 - cx, ys * 4 - cy), 93)
+    return int(cx), int(cy), int(r)
 
 
-def center_square(im, zoom):
-    """纯居中方裁。主体在画面中心时这是唯一正确的做法 ——
-    不猜圆心就不可能把主体裁偏。zoom 越大裁得越紧、主体越大。"""
-    side = int(min(im.size) / zoom)
-    cx, cy = im.width // 2, im.height // 2
-    half = side // 2
-    half = min(half, cx, cy)
-    return cx, cy, half
-
-
-def build(path, out, center=None, radius=None, mode='portrait', zoom=1.0):
-    """两种裁法。
-
-    disc：他蜷成球时用。主体本身就是圆的，占 72%，四周留黑给晕影，
-          并在最外环带压掉残留背景。
-    portrait：坐着站着时用。裁到头，占 90%，晕影往里收到 0.60 —— 地板和
-          家具在外圈直接死掉。这种照片的背景常是暖木色，跟毛色同色系，
-          冷暖分割会把毛一起啃掉，所以不清背景。
-    """
-    frac, clean = (FRAC, True) if mode == 'disc' else (0.90, False)
-
-    # exif_transpose 必须有：手机竖拍的照片元数据里带旋转标记，
-    # 不应用的话狗是躺着的。从 ImageMagick 换到 PIL 时把 -auto-orient 弄丢了
-    im = ImageOps.exif_transpose(Image.open(path)).convert('RGB')
-    if center and radius:
-        cx, cy, r = center[0], center[1], radius
-    elif zoom:
-        cx, cy, r = center_square(im, zoom)
-    else:
-        cx, cy, r = find_subject(im)
+def build(path, out, center=None, radius=None):
+    im = Image.open(path).convert('RGB')
+    cx, cy, r = center + (radius,) if center and radius else find_subject(im)
     r = min(r, cx, cy, im.width - cx, im.height - cy)
 
     dog = im.crop((cx - r, cy - r, cx + r, cy + r))
-    D = int(SRC * frac)
+    D = int(SRC * FRAC)
     dog = dog.resize((D, D), Image.LANCZOS)
 
     # 只在最外一圈环带上压残留背景。往里一步都不碰 ——
     # 不限半径的话，白毛的阴影会被当成地板一起啃掉
-    if clean:
-        a = np.asarray(dog).astype(np.int16)
-        Rc, Gc, Bc = a[:, :, 0], a[:, :, 1], a[:, :, 2]
-        yy, xx = np.mgrid[0:D, 0:D]
-        edge = np.clip((np.hypot(xx - D / 2, yy - D / 2) / (D / 2) - 0.86) / 0.14, 0, 1)
-        cool = (Bc > Rc + 14) & (Gc > Rc + 8)
-        pale = (a.mean(2) > 150) & (Gc - Rc < 0)
-        bg = Image.fromarray(((cool | pale) * 255).astype(np.uint8)).filter(ImageFilter.MedianFilter(7))
-        bg = np.asarray(bg.filter(ImageFilter.GaussianBlur(5))).astype(np.float32) / 255.0
-        dog = Image.fromarray((np.asarray(dog) * (1 - bg * edge)[..., None]).astype(np.uint8))
+    a = np.asarray(dog).astype(np.int16)
+    Rc, Gc, Bc = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+    yy, xx = np.mgrid[0:D, 0:D]
+    edge = np.clip((np.hypot(xx - D / 2, yy - D / 2) / (D / 2) - 0.86) / 0.14, 0, 1)
+    cool = (Bc > Rc + 14) & (Gc > Rc + 8)
+    pale = (a.mean(2) > 150) & (Gc - Rc < 0)
+    bg = Image.fromarray(((cool | pale) * 255).astype(np.uint8)).filter(ImageFilter.MedianFilter(7))
+    bg = np.asarray(bg.filter(ImageFilter.GaussianBlur(5))).astype(np.float32) / 255.0
+    dog = Image.fromarray((np.asarray(dog) * (1 - bg * edge)[..., None]).astype(np.uint8))
 
     # 羽化的圆形遮罩：软边既像浮在黑里，也不给 JPEG 的 DCT 留硬边去振铃
     mask = Image.new('L', (D, D), 0)
@@ -7257,82 +5680,36 @@ def main():
     ap.add_argument('--center', help='主体圆心 x,y（不给则自动猜）')
     ap.add_argument('--radius', type=int, help='主体半径')
     ap.add_argument('--name', default='tuan', help='设备端目录名 -> /spiflash/<name>')
-    ap.add_argument('--disc', nargs='*', default=[],
-                    help='用 disc 模式（蜷成球）处理的文件名，其余一律 portrait')
-    ap.add_argument('--glyph-from', default=None,
-                    help='用哪张生成点阵字形。默认挑第一张 disc 模式的 —— '
-                         '半调点阵在圆形主体上最好认，坐姿做出来会糊')
-    ap.add_argument('--zoom', type=float, default=1.35,
-                    help='居中方裁的收紧系数。1.0=整个短边，越大裁得越紧、主体越大。'
-                         '主体在画面中心时用这个，不猜圆心就不会裁偏')
-    ap.add_argument('--exif-only', action='store_true',
-                    help='只收有 EXIF 拍摄日期的照片')
-    ap.add_argument('--crops', default=None,
-                    help='scripts/pick_crops.html 导出的 JSON：'
-                         '{"文件名": {"cx":.., "cy":.., "r":.., "mode":"disc|portrait"}}')
-    ap.add_argument('--captions', default=None,
-                    help='可选的 JSON：{"文件名": "海边"}。写场景，不要写年龄')
     args = ap.parse_args()
 
     center = tuple(int(v) for v in args.center.split(',')) if args.center else None
-    caps = json.loads(pathlib.Path(args.captions).read_text()) if args.captions else {}
-    crops = json.loads(pathlib.Path(args.crops).read_text()) if args.crops else {}
-    disc_set = set(args.disc)
-
     out_dir = pathlib.Path(__file__).resolve().parent.parent / 'build' / 'tuantuan'
     if out_dir.exists():
         for f in out_dir.iterdir():
             f.unlink()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 先按日期排。没日期的排在最后，保持给定顺序
-    srcs = [pathlib.Path(s) for s in args.photos if pathlib.Path(s).is_file()]
-    dated = [(photo_date(p), p) for p in srcs]
-    if args.exif_only:
-        dated = [x for x in dated if x[0]]
-    dated.sort(key=lambda x: (x[0] is None, x[0] or date.min))
-
-    items, undated, n = [], [], 0
-    glyph_src = None
-    for d, p in dated:
+    n = 0
+    for src in args.photos:
+        p = pathlib.Path(src)
+        if not p.is_file():
+            continue
         n += 1
-        c = crops.get(p.name)
-        mode = c['mode'] if c and 'mode' in c else ('disc' if p.name in disc_set else 'portrait')
-        ctr = (c['cx'], c['cy']) if c else center
-        rad = c['r'] if c else args.radius
         dst = out_dir / f'{n:02d}.jpg'
-        cx, cy, r = build(p, dst, ctr, rad, mode, args.zoom)
-        if glyph_src is None and (args.glyph_from == p.name or
-                                  (args.glyph_from is None and mode == 'disc')):
-            glyph_src = dst
-        items.append({'file': dst.name,
-                      'date': d.isoformat() if d else None,
-                      'caption': caps.get(p.name, ''),
-                      'mode': mode})
-        if d is None:
-            undated.append(p.name)
-        print(f'  {p.name:<24} -> {dst.name}  {dst.stat().st_size // 1024:>3}KB  '
-              f'{mode:<8} {d.isoformat() if d else "日期未知"}')
+        cx, cy, r = build(p, dst, center, args.radius)
+        print(f'  {p.name:<26} -> {dst.name}  {dst.stat().st_size // 1024}KB'
+              f'   主体 ({cx},{cy}) r={r}')
 
     if not n:
         sys.exit('没有处理任何文件')
 
-    # 点阵字形：守的长按确认要用
-    make_glyph(glyph_src or (out_dir / '01.jpg'), out_dir / 'glyph.png')
-    print(f"  glyph.png  {(out_dir / 'glyph.png').stat().st_size // 1024}KB   "
-          f"点阵字形（源：{(glyph_src or out_dir / '01.jpg').name}）")
+    # 点阵字形：守的长按确认要用，从第一张生成
+    make_glyph(out_dir / '01.jpg', out_dir / 'glyph.png')
+    print(f"  glyph.png  {(out_dir / 'glyph.png').stat().st_size // 1024}KB   点阵字形")
 
-    (out_dir / 'manifest.json').write_text(
-        json.dumps({'name': args.name, 'items': items}, ensure_ascii=False, indent=1))
-
-    if undated:
-        print(f'\n{len(undated)} 张没读到拍摄日期（微信转发会剥掉 EXIF）：')
-        for u in undated:
-            print(f'    {u}')
-        print('  它们照样进轮播，只是不落在「喜」的环上。')
-        print('  想让它们上环：文件名前面加 2022-06_ 这样的前缀，重跑一次即可。')
+    (out_dir / 'manifest.json').write_text(json.dumps({'name': args.name, 'count': n}))
     total = sum(f.stat().st_size for f in out_dir.iterdir()) // 1024
-    print(f'\n共 {n} 张，{total}KB')
+    print(f'共 {n} 张，{total}KB')
     if total > BUDGET_KB:
         sys.exit(f'超过 Hardware Buddy 的 1.8MB 上限。减少张数，或把 quality 调到 85。')
     print(f'好了。把 {out_dir} 拖到 Hardware Buddy 窗口上。')

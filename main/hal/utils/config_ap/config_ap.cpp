@@ -5,7 +5,6 @@
  */
 #include "config_ap.h"
 
-#include <ArduinoJson.h>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -21,7 +20,6 @@
 #include <esp_log.h>
 #include <esp_mac.h>
 #include <esp_netif.h>
-#include <esp_system.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
@@ -137,12 +135,6 @@ public:
         xEventGroupWaitBits(_event_group, _exit_requested_bit, pdTRUE, pdFALSE, portMAX_DELAY);
 
         stop();
-
-        if (_restart_requested) {
-            log("Connection saved. Restarting watch...");
-            vTaskDelay(pdMS_TO_TICKS(250));
-            esp_restart();
-        }
 
         log("Exited edit mode");
         return true;
@@ -276,18 +268,6 @@ private:
             .handler  = &Session::handle_close,
             .user_ctx = this,
         };
-        httpd_uri_t connection_state = {
-            .uri      = "/sinan/config",
-            .method   = HTTP_GET,
-            .handler  = &Session::handle_connection_state,
-            .user_ctx = this,
-        };
-        httpd_uri_t save_connection = {
-            .uri      = "/sinan/config",
-            .method   = HTTP_POST,
-            .handler  = &Session::handle_save_connection,
-            .user_ctx = this,
-        };
 
         httpd_uri_t captive = {
             .uri      = nullptr,
@@ -314,12 +294,6 @@ private:
         }
         if (ret == ESP_OK) {
             ret = httpd_register_uri_handler(_server, &close);
-        }
-        if (ret == ESP_OK) {
-            ret = httpd_register_uri_handler(_server, &connection_state);
-        }
-        if (ret == ESP_OK) {
-            ret = httpd_register_uri_handler(_server, &save_connection);
         }
         if (ret == ESP_OK) {
             for (const auto* url : _captive_portal_urls) {
@@ -534,65 +508,6 @@ private:
         return ESP_OK;
     }
 
-    static esp_err_t handle_connection_state(httpd_req_t* req)
-    {
-        auto* self = self_from_request(req);
-        if (self == nullptr || self->_callbacks.onGetConnection == nullptr) {
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "connection handler missing");
-            return ESP_FAIL;
-        }
-        const auto state = self->_callbacks.onGetConnection();
-        JsonDocument doc;
-        doc["configured"] = state.configured;
-        doc["uri"] = state.uri;
-        std::string body;
-        serializeJson(doc, body);
-        send_json(req, body);
-        return ESP_OK;
-    }
-
-    static esp_err_t handle_save_connection(httpd_req_t* req)
-    {
-        auto* self = self_from_request(req);
-        if (self == nullptr || self->_callbacks.onSaveConnection == nullptr) {
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save connection handler missing");
-            return ESP_FAIL;
-        }
-        if (req->content_len <= 0 || req->content_len > 2048) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid settings size");
-            return ESP_FAIL;
-        }
-        std::string body(static_cast<size_t>(req->content_len), '\0');
-        size_t offset = 0;
-        while (offset < body.size()) {
-            const int got = httpd_req_recv(req, body.data() + offset, body.size() - offset);
-            if (got <= 0) {
-                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read settings");
-                return ESP_FAIL;
-            }
-            offset += static_cast<size_t>(got);
-        }
-        JsonDocument doc;
-        if (deserializeJson(doc, body) != DeserializationError::Ok) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
-            return ESP_FAIL;
-        }
-        ConnectionRequest request;
-        request.ssid     = doc["ssid"] | "";
-        request.password = doc["password"] | "";
-        request.uri      = doc["uri"] | "";
-        request.token    = doc["token"] | "";
-        std::string message;
-        if (!self->_callbacks.onSaveConnection(request, message)) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                message.empty() ? "save failed" : message.c_str());
-            return ESP_FAIL;
-        }
-        self->_restart_requested = true;
-        send_json(req, make_message_json("ok", message));
-        return ESP_OK;
-    }
-
     static esp_err_t handle_upload(httpd_req_t* req)
     {
         auto* self = self_from_request(req);
@@ -658,7 +573,6 @@ private:
     Callbacks _callbacks;
     std::string _ssid;
     std::unique_ptr<DnsServer> _dns_server;
-    bool _restart_requested = false;
 };
 
 }  // namespace

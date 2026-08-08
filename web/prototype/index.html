@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>司南 · 壳层原型</title>
+<style>
+  body { margin:0; background:#0b0a09; color:#8a857b; font:13px/1.6 ui-monospace,monospace;
+         display:flex; gap:24px; padding:24px; justify-content:center; flex-wrap:wrap; }
+  canvas { border-radius:50%; box-shadow:0 0 60px #000; cursor:crosshair; }
+  .panel { width:240px; }
+  .panel h1 { font-size:15px; color:#c8a96e; font-weight:normal; }
+  .panel h2 { font-size:12px; color:#6e5c3a; margin:14px 0 4px; font-weight:normal; }
+  button { display:block; width:100%; margin:3px 0; padding:6px 10px; background:#141210;
+           color:#c8a96e; border:1px solid #2a251d; border-radius:6px; cursor:pointer;
+           font:inherit; text-align:left; }
+  button:hover { border-color:#c8a96e; }
+  button.red { color:#d6442f; } button.green { color:#4fa88a; }
+  #log { white-space:pre-wrap; color:#5a564d; font-size:11px; max-height:180px; overflow:auto; }
+  .hint { color:#4a463e; font-size:11px; }
+</style>
+</head>
+<body>
+<canvas id="scr" width="466" height="466"></canvas>
+<div class="panel">
+  <h1>司南 · 四层壳原型</h1>
+  <div class="hint">tokens 由 scripts/export_design_tokens.py 从 design.h 生成</div>
+  <h2>物理键</h2>
+  <button id="k-a">A 短按 — 肯定</button>
+  <button id="k-al">A 长按 — 危险确认</button>
+  <button id="k-b">B 短按 — 否定/切换</button>
+  <button id="k-bl">B 长按 — 回退</button>
+  <button id="k-ab">A+B — 层切换</button>
+  <h2>注入事件</h2>
+  <button id="e-appr" class="red">审批（Grave: rm -rf）</button>
+  <button id="e-appr2">审批（Normal）</button>
+  <button id="e-pair">配对码</button>
+  <button id="e-err" class="red">ERROR 通知</button>
+  <button id="e-done" class="green">DONE 通知</button>
+  <h2>手势</h2>
+  <div class="hint">Rim 快滑=盘珠 / 慢滑=抚触 / 点中心=Peek / 长点中心=对讲</div>
+  <h2>日志</h2>
+  <div id="log"></div>
+</div>
+<script src="shell.js"></script>
+</body>
+</html>

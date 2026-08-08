@@ -8,14 +8,8 @@
 
 namespace sinan::voice {
 
-/* Work 内的编程语音：A 开始、A 停止并转写、B 确认发送。 */
-bool begin(const char* target);
-void end();
-bool submit(const char* target);
-void clear();
-void abort();
-
-// 录音任务还在跑。UI 用它判断能不能开始下一次
-bool busy();
+void begin();  // 起录音任务
+void end();    // 收尾并发 asr_end
+void abort();  // 丢弃本次录音
 
 }  // namespace sinan::voice

@@ -16,7 +16,6 @@
 #include <unistd.h>
 
 #include <mooncake_log.h>
-#include <sinan/runtime_config.h>
 
 static const std::string_view _tag = "HAL-Badge";
 
@@ -439,22 +438,6 @@ bool save_badge_upload(const badge::config_ap::UploadRequest& request, std::stri
     return true;
 }
 
-badge::config_ap::ConnectionState get_connection_state()
-{
-    const auto config = sinan::runtime_config::load();
-    return {.configured = config.configured(), .uri = config.uri};
-}
-
-bool save_connection(const badge::config_ap::ConnectionRequest& request, std::string& message)
-{
-    sinan::runtime_config::BridgeConfig config;
-    config.ssid = request.ssid;
-    config.password = request.password;
-    config.uri = request.uri;
-    config.token = request.token;
-    return sinan::runtime_config::save(config, message);
-}
-
 }  // namespace
 
 bool Hal::loadBadgeImage(lv_obj_t* image)
@@ -521,7 +504,5 @@ void Hal::startBadgeEditModeViaAp(std::function<void(std::string_view)> onLog)
                                      .onGetImage  = get_badge_image,
                                      .onSetActive = set_active_badge_slot,
                                      .onDelete    = delete_badge_slot,
-                                     .onGetConnection = get_connection_state,
-                                     .onSaveConnection = save_connection,
                                  });
 }

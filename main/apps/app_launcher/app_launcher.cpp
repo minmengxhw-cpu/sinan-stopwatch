@@ -8,12 +8,9 @@
 #include <hal/hal.h>
 #include <mooncake.h>
 #include <mooncake_log.h>
-#include <sinan/design.h>
 #include <cstdint>
-#include <algorithm>
 
 using namespace mooncake;
-using namespace sinan::design;
 
 void AppLauncher::onLauncherCreate()
 {
@@ -35,7 +32,7 @@ void AppLauncher::onLauncherOpen()
             _pending_status_bar_create = true;
             _status_bar_create_tick    = GetHAL().millis() + 800;
         } else {
-            view::create_status_bar(INK, BRONZE, true);
+            view::create_status_bar(0xEDF4FF, 0x385179, true);
         }
     }
 
@@ -58,7 +55,7 @@ void AppLauncher::onLauncherRunning()
 
     // Check pending status bar creation
     if (_pending_status_bar_create && !view::is_status_bar_created() && now >= _status_bar_create_tick) {
-        view::create_status_bar(INK, BRONZE, false);
+        view::create_status_bar(0xEDF4FF, 0x385179, false);
         _pending_status_bar_create = false;
     }
 
@@ -101,30 +98,7 @@ void AppLauncher::onLauncherDestroy()
 void AppLauncher::create_launcher_view()
 {
     _view = std::make_unique<view::LauncherView>();
-    auto props = getAppProps();
-    // 照片第一；沉香仪式第二；其余按司南工作流排序。
-    props.erase(std::remove_if(props.begin(), props.end(), [](const auto& item) {
-        const auto& name = item.info.name;
-        return name != "Photos" && name != "Agarwood" && name != "Work" && name != "Buddy" &&
-               name != "Tools" && name != "Connect" && name != "Stopwatch" &&
-               name != "Badge" && name != "Settings";
-    }), props.end());
-    const auto rank = [](const auto& item) {
-        const auto& name = item.info.name;
-        if (name == "Photos") return 0;
-        if (name == "Agarwood") return 1;
-        if (name == "Work") return 2;
-        if (name == "Buddy") return 3;
-        if (name == "Tools") return 4;
-        if (name == "Connect") return 5;
-        if (name == "Stopwatch") return 6;
-        if (name == "Badge") return 7;
-        return 8;
-    };
-    std::stable_sort(props.begin(), props.end(), [&](const auto& a, const auto& b) {
-        return rank(a) < rank(b);
-    });
-    _view->init(std::move(props));
+    _view->init(getAppProps());
     _view->onAppClicked = [&](int appID) {
         mclog::tagInfo(getAppInfo().name, "handle open app, app id: {}", appID);
         openApp(appID);

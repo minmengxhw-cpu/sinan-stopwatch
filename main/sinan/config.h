@@ -1,8 +1,9 @@
 /*
  * config.h — 用户配置。这是唯一需要在烧录前改的文件。
  *
- * 注意 BLE 通道不需要任何配置：官方 buddy 协议靠桌面端主动扫描配对，
- * 不用填 IP、不用配网。WiFi 桥接改由设备上的 Connect 页面写入 NVS。
+ * BLE 两条通道（Buddy NUS + HID 键盘）不需要任何配置：
+ * 桌面端扫描配对即用，不用填 IP、不用配网。
+ * 下面这些只影响 WiFi 那条增强通道（阵的数据、对讲转写）。
  */
 #pragma once
 
@@ -13,11 +14,11 @@
 // Mac 上 sinand.py 的地址。查本机 IP：ipconfig getifaddr en0
 #define SN_WS_URI "ws://192.168.1.100:8790/sinan"
 
-/*
- * 开机直接进入哪个应用。留空字符串则停在 launcher。
- *
- * 默认 Photos：先看到真实的狗狗原图；守仍会被权限请求"拉起来" ——
- * 有请求时会自动从任何应用切过去，处理完再切回来，不需要你记得开它。
- * 可选 "Photos" / "Agarwood" / "Work" / "Buddy" / ""
- */
-#define SN_BOOT_APP "Photos"
+// BLE HID 键盘通道（Action 层 OK/NG/文本注入）。关掉则只剩 Buddy + WS
+#define SN_HID_ENABLE 1
+
+// WiFi/WS 增强通道。关掉则阵只有 BLE 心跳数据，对讲不可用
+#define SN_WS_ENABLE 1
+
+// 开机即壳（寐层）。启动器已退役，此项仅为文档标记
+#define SN_BOOT_APP "Sinan"

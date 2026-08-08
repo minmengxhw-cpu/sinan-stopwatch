@@ -1,20 +1,13 @@
 /*
  * state.h — 全局状态。
  *
- * 职责边界：网络线程与 UI 线程之间唯一的数据交换点。
+ * 职责边界：这是网络线程与 UI 线程之间唯一的数据交换点。
  * 网络回调只写这里，应用只读这里的快照。任何一方都不要跨过它直接找对方。
- *
- * 并发模型：FreeRTOS 递归互斥量，不是自旋锁。
- * 早期版本用 portENTER_CRITICAL 保护，而临界区里要拷十几个 std::string ——
- * 关中断期间进堆分配器在 ESP32 上是教科书级的崩法。互斥量允许临界区里分配，
- * 代价是不能在 ISR 里用（我们也没有 ISR 写 State）。
  */
 #pragma once
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <string>
 
 namespace sinan {
@@ -23,7 +16,7 @@ namespace sinan {
 
 struct BleState {
     bool connected      = false;
-    uint32_t last_beat  = 0;
+    uint32_t last_beat  = 0;   // 最后一次心跳的 millis
     int total           = 0;
     int running         = 0;
     int waiting         = 0;
@@ -37,11 +30,11 @@ struct BleState {
     std::string prompt_hint;
     uint32_t prompt_since = 0;
 
-    // 已决策但心跳还没跟上的请求。见 State::decide() 的说明
-    std::string settled_id;
+    // DisplayOnly 配对：设备负责把 6 位码显示出来，不显示链路就永远配不上
+    bool passkey_pending = false;
+    uint32_t passkey = 0;
 
     std::string owner;
-    uint32_t passkey = 0;      // 非 0 表示正在配对，UI 要把它显示出来
 };
 
 /* ------------------------------ WS 侧 ------------------------------ */
@@ -53,7 +46,7 @@ struct Worker {
     std::string label;
     std::string task;
     WorkerState state = WorkerState::Down;
-    float quota       = 0.0f;
+    float quota       = 0.0f;  // 0.0–1.0 剩余比例
 };
 
 struct FleetState {
@@ -67,31 +60,49 @@ struct FleetState {
 struct AlmanacState {
     std::string number_code;
     std::string number_title;
-    std::string huangli_trend;
+    std::string huangli_trend;  // "up" / "flat" / "down"
     std::string huangli_yi;
     std::string huangli_ji;
-    int ring_doy = 0;
+    int ring_doy = 0;           // 年轮当前高亮的年内第几天
     std::string ring_tag;
     uint32_t last_recv = 0;
 };
 
 /* ------------------------------ 语音侧 ------------------------------ */
 
-enum class VoicePhase : uint8_t {
-    Idle, Recording, Sending, Transcribing, Ready, Thinking, Speaking, Error
-};
+enum class VoicePhase : uint8_t { Idle, Recording, Uploading, Thinking, Speaking };
 
 struct VoiceState {
     VoicePhase phase = VoicePhase::Idle;
-    std::string target;
     std::string heard;
     std::string reply;
-    std::string note;   // 出错时给人看的一行英文，如 "no link" / "too short"
 };
+
+/* ------------------------------ 计数 ------------------------------ */
 
 struct Tally {
     uint32_t approved = 0;
     uint32_t denied   = 0;
+    uint32_t uptime_s = 0;
+};
+
+/* ------------------------------ 中断事件 ------------------------------ */
+/* Approval 走 ble.has_prompt（有自己的字段与校验链），这里只承载
+   Error / Done 这类「通知型」全屏中断。写入方：bridge_ws / 未来的桥。*/
+
+enum class IrqKind : uint8_t { None, Error, Done };
+
+struct IrqEvent {
+    bool active = false;
+    IrqKind kind = IrqKind::None;
+    std::string id;      // 去重 key 的一部分，来源方给出（task id 等）
+    std::string title;   // 大字一行
+    std::string body;    // 次级一行
+    uint32_t since_ms = 0;
+};
+
+struct HidState {
+    bool connected = false;
 };
 
 struct Snapshot {
@@ -100,6 +111,8 @@ struct Snapshot {
     AlmanacState almanac;
     VoiceState voice;
     Tally tally;
+    IrqEvent irq;
+    HidState hid;
     bool wifi_up = false;
     bool ws_up   = false;
 };
@@ -111,36 +124,28 @@ public:
     // 读：拿一份完整拷贝，之后随便用，不用再持锁
     Snapshot snapshot();
 
-    /*
-     * 写：在锁内对状态做原地修改。
-     *
-     * 所有写路径都必须走这个函数，不能"读快照 → 改 → 写回"——
-     * 那是跨线程的读改写，会丢更新：你按下批准清掉 prompt 的同时，
-     * BLE 任务正拿着批准前的旧副本准备写回，prompt 就诈尸了。
-     */
-    void mutate(const std::function<void(Snapshot&)>& fn);
+    // 写：只在网络线程调用。临界区里只做赋值，不做 IO、不碰 LVGL
+    void withLock(void (*fn)(Snapshot&, void*), void* ctx);
 
-    /*
-     * 记下一个已决策的请求 id 并立刻清掉 prompt，全程在同一把锁内。
-     * settled_id 用来吃掉后面几拍还带着同一个 prompt 的陈旧心跳 ——
-     * 桌面端要过一两百毫秒才知道我们批过了。
-     */
-    void decide(const std::string& id, bool approved);
-
+    // 便捷写入器
+    void setBle(const BleState& s);
+    void clearPrompt();
+    void setFleet(const FleetState& s);
+    void setAlmanac(const AlmanacState& s);
+    void setVoice(const VoiceState& s);
     void setLink(bool wifi, bool ws);
+    void bumpApproved();
+    void bumpDenied();
+    void setIrq(const IrqEvent& e);
+    void clearIrq();
+    void setHid(bool connected);
+    void setPasskey(uint32_t code);
+    void clearPasskey();
 
 private:
-    State();
+    State() = default;
     Snapshot _s;
-    SemaphoreHandle_t _mtx = nullptr;
-
-    class Lock {
-    public:
-        explicit Lock(SemaphoreHandle_t m) : _m(m) { xSemaphoreTakeRecursive(_m, portMAX_DELAY); }
-        ~Lock() { xSemaphoreGiveRecursive(_m); }
-    private:
-        SemaphoreHandle_t _m;
-    };
+    portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
 };
 
 }  // namespace sinan

@@ -4,13 +4,9 @@
 bind = "0.0.0.0"
 port = 8790
 # 命令在干净环境执行，不受你 shell 配置污染。按需补 PATH
-path = "/Users/cheer/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 fleet_interval   = 20     # Fleet 推送间隔（秒）
 almanac_interval = 3600   # Almanac 推送间隔（秒）
-
-[security]
-# 首次启动自动生成，权限为 0600。不要把内容贴进聊天或提交到仓库。
-token_file = "~/.sinan/bridge.token"
 
 # ---------------------------------------------------------------- worker
 #
@@ -21,28 +17,24 @@ token_file = "~/.sinan/bridge.token"
 # quota 的口径由你自己定义 —— 设备端只管把弧画短，不做业务判断。
 
 [[worker]]
-id      = "codex"
-label   = "CODEX"
-kind    = "cli"
-command = "codex"
-active_pattern = "codex .* exec|codex-exec"
-online_task = "ready for voice"
-running_task = "voice instruction"
+id    = "claude"
+label = "CC"
+probe = "~/.sinan/probe_claude.sh"
 
 [[worker]]
-id     = "paseo"
-label  = "PASEO"
-kind   = "paseo"
-agents = "~/.paseo/agents"
+id    = "codex"
+label = "CODEX"
+probe = "~/.sinan/probe_codex.sh"
 
 [[worker]]
-id      = "grok"
-label   = "GROK"
-kind    = "cli"
-command = "grok"
-active_pattern = "grok .*--single|grok .* -p "
-online_task = "ready for voice"
-running_task = "voice instruction"
+id    = "minimax"
+label = "MM"
+probe = "~/.sinan/probe_minimax.sh"
+
+[[worker]]
+id    = "grok"
+label = "GROK"
+probe = "~/.sinan/probe_grok.sh"
 
 # ---------------------------------------------------------------- almanac
 #
@@ -52,38 +44,34 @@ running_task = "voice instruction"
 #    "ring":[{"doy":218,"tag":"盟史 #412"}]}
 
 [almanac]
-number_archive = "~/.local/share/the-machine/archive/numbers"
-# 可选：若需要补充黄历/年轮，可配置只读 JSON 输出命令。
-# source = "~/.sinan/almanac.sh"
+source = "~/.sinan/almanac.sh"
 
 # ---------------------------------------------------------------- voice
 #
 # 全本地链路，不接任何云端语音服务。
-# {wav} 会被替换成录音文件路径。
+# {wav} 会被替换成录音文件路径，{text} 会被替换成转写结果（已 JSON 转义）。
 
 [voice]
-asr_cmd   = "/opt/homebrew/bin/whisper-cli -m /Users/cheer/.sinan/models/ggml-large-v3-turbo-q5_0.bin -f {wav} -l zh --no-timestamps --no-prints --threads 8 2>/dev/null"
+asr_cmd   = "whisper-cli -m ~/models/ggml-large-v3-turbo.bin -f {wav} -l zh --no-timestamps -np 2>/dev/null | tail -1"
+agent_cmd = "claude -p {text} 2>&1 | tail -20"
+agent_timeout = 180
 tts_voice = "Tingting"
-
-# ---------------------------------------------------------------- programming
-# A 录音、A 停止转写、B 确认后，指令只会路由到以下三个固定实现。
-# 用户说的话作为独立 argv 传入，不会拼进 shell。
-
-[programming]
-cwd = "~/Documents/Codex/2026-08-08/zhe"
-timeout = 600
-codex_timeout = 300
-codex_cmd = "/Users/cheer/.local/bin/codex"
-codex_transport = "app-server"
-codex_socket = "~/.codex/app-server-control/app-server-control.sock"
-codex_model = "gpt-5.6-terra"
-codex_reasoning = "low"
-paseo_cmd = "/Users/cheer/.local/bin/paseo"
-grok_cmd = "/Users/cheer/.local/bin/grok"
-paseo_provider = "claude"
-paseo_mode = "auto"
-grok_mode = "default"
+# inject = true 时，转写结果用 osascript 直接打进当前焦点窗口（不过 agent_cmd）。
+# 写代码时按住表中心说话，话落进编辑器 —— 这是对讲最短的链路
+inject    = false
 
 # ---------------------------------------------------------------- action
 #
-# 设备端动作只保留 daily_number；配置不能新增 shell 命令。
+# 设备上按键直接触发的白名单命令。只有这里列出的能执行。
+
+[[action]]
+id      = "daily_number"
+label   = "NUMBER"
+cmd     = "~/.sinan/almanac.sh | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"number\"][\"title\"])'"
+timeout = 30
+
+[[action]]
+id      = "brief"
+label   = "BRIEF"
+cmd     = "claude -p '用三句话说说过去 24 小时值得注意的事' 2>&1 | tail -10"
+timeout = 180

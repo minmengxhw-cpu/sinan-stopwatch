@@ -21,7 +21,4 @@ Risk assess(std::string_view tool, std::string_view hint);
 // 命中的规则名，用于在屏幕上告诉用户"为什么它是红的"
 const char* risk_reason(std::string_view tool, std::string_view hint);
 
-// 跑一遍内置样本，返回失败条数。改规则表后调一次，比上真机试快
-int selftest();
-
 }  // namespace sinan

@@ -28,16 +28,6 @@ void release(const lv_image_dsc_t* dsc);
 
 const char* name_of(int index);
 
-// manifest.json 里那张照片的 caption（"海边""抢飞盘"）。没有就返回日期，
-// 再没有就返回空串。**永远不要在这里返回年龄** —— 见 AGENTS.md §9.4b
-const char* caption_of(int index);
-
-// manifest 里的 date，没有就是空串
-const char* date_of(int index);
-
-// 这张是不是 disc 形态（他蜷成球）。决定晕影内缘收在哪
-bool is_disc(int index);
-
 // 收到 BLE 文件夹推送后重扫
 void rescan();
 

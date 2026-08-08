@@ -21,7 +21,6 @@ static int s_jitter_phase        = 0;
 static Luma s_luma               = Luma::Normal;
 static Luma s_luma_applied       = Luma::Normal;
 static uint32_t s_luma_changed   = 0;
-static int s_refs                = 0;
 
 lv_obj_t* precession_root()
 {
@@ -40,33 +39,12 @@ lv_obj_t* precession_root()
     lv_obj_set_style_transform_pivot_x(s_root, CENTER, 0);
     lv_obj_set_style_transform_pivot_y(s_root, CENTER, 0);
     lv_obj_set_style_transform_rotation(s_root, s_offset_decideg, 0);
-    // 默认藏起来，否则这块全屏黑板会把 launcher 整个盖掉
-    lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
     return s_root;
-}
-
-void root_acquire()
-{
-    lv_obj_t* r = precession_root();
-    if (s_refs++ == 0) {
-        lv_obj_remove_flag(r, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(r);
-    }
-}
-
-void root_release()
-{
-    if (s_refs > 0 && --s_refs == 0 && s_root) {
-        lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
-    }
 }
 
 void precession_tick(uint32_t now_ms)
 {
     if (!s_root) return;
-
-    // 这里会动 LVGL 对象，而调用方是主循环，没有别处帮它上锁
-    LvglLockGuard lock;
 
     if (now_ms - s_last_precess >= PRECESS_INTERVAL_MS) {
         s_last_precess = now_ms;

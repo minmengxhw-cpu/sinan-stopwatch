@@ -1,81 +1,61 @@
-# 司南 SINAN v3.1.1
+# 司南 SINAN
 
-M5Stack StopWatch（C152）桌面 AI 编程终端，基于官方 `M5StopWatch-UserDemo`。
+一台放在 Mac 边上的圆形 AI 决策仪。默认是一只蜷成正圆睡觉的边牧（团团），
+有权限请求时朱砂/琥珀抢屏，干活时 A+B 切到 agent 环与 Action 层，
+配对后它就是一把蓝牙键盘 —— 不回 Mac 也能 OK / NG / 说话进焦点窗口。
 
-## 当前功能
+基于 M5Stack StopWatch（C152），fork 自官方 `M5StopWatch-UserDemo`。
 
-| 应用 | 用途 | 通道 |
+---
+
+## 它是一件东西，不是五个 App
+
+```
+L3  Interrupt  审批 / 配对码 / ERROR / DONE（可抢占任何层，45s 去重）
+L2  Action     FAST · NG · OK · PLAN · AI · 中央对讲（BLE HID 发键）
+L1  Work       阵：≤6 agent 极坐标环，段弧=额度，颜色=状态
+L0  Rest       寐：团团照片（身体）+ 点阵（灵魂）+ 项圈珠串（今天的因果）  ← 默认
+```
+
+切层只是显隐，照片不重新解码。键位全机唯一（`main/sinan/input_map.h`）：
+
+| 输入 | 语义 |
+|---|---|
+| A 短 / A 长 | 肯定 / 危险确认（Grave 长按 0.8s，团团填色） |
+| B 短 / B 长 | 否定·切换 / 回退（Rest 里 B 长 = Settings） |
+| A+B | 层切换：Rest→Work→Action |
+| Rim 快滑 / 慢滑 | 盘珠·切 agent / 抚触团团（呼噜） |
+| 敲桌子 / 点中心 | 露时间 6 秒 |
+| 中心长按 | 对讲（录音→daemon 转写→可直注焦点窗口） |
+
+## 三条通道，各走各的
+
+| 通道 | 干什么 | 依赖 |
 |---|---|---|
-| Photos | 2 张团团照片待机页（2020 小时候、蜷缩睡觉） | 本地存储 |
-| Work | Codex、PASEO、Grok Build 的真实状态与编程语音入口 | Wi‑Fi WebSocket |
-| Agarwood | 沉香点燃、燃烧与余韵仪式 | 本地动画 |
-| Buddy | Claude Desktop 硬件权限提示 | BLE 官方协议 |
-| Tools / Connect | 设备状态与本地私有配网 | 本地 AP |
-| Stopwatch / Badge | 官方硬件功能 | 本地 |
+| BLE NUS | Claude Desktop Buddy 权限审批、照片推送 | 官方协议 |
+| BLE HID | Action 层按键进焦点窗口，**冷启动零依赖** | 系统蓝牙配对即可 |
+| WiFi WS | 阵的多厂额度、对讲转写、DONE/ERROR 通知 | `daemon/sinand.py` |
 
-Work 不包含 Happy、HappyCode、独立 Voice、待办记录或灵感记录。
+任一条挂掉不影响其他。配对时 6 位码直接显示在屏上（DisplayOnly）。
 
-## Work 操作
-
-Work 首页：
-
-- B：依次选择 Codex、PASEO、Grok Build。
-- A：进入当前编程工具。
-- A+B 或向下滑：返回启动器。
-
-进入工具后：
-
-- A：开始录音。
-- A 再按一次：停止录音并在 Mac 本地转写。
-- 屏幕显示转写结果后，B：把这条指令发送给当前工具。
-- 转写不对时按 A 重新录，不会误发。
-- A+B 或向下滑：退回 Work 首页。
-
-## Mac 桥接
-
-桥接安装在 `~/.sinan/app/`，launchd 标签为 `com.sinan.daemon`，默认监听
-`0.0.0.0:8790`。配对令牌只保存在 `~/.sinan/bridge.token`，不会写进源码。
-
-默认只路由三个固定目标：
-
-- Codex：连接本机常驻的 Codex app-server，会话复用并保留工作区沙箱。
-- PASEO：`paseo run --provider claude`，由 PASEO 管理会话。
-- Grok Build：`grok --single`。
-
-PASEO 与 Grok 使用各自默认权限模式，不自动扩大权限。所有语音指令都作为独立
-命令参数传入，不拼接成 shell 文本；桥接还会附加“禁止删除本地文件”的约束。
-
-## 首次配网
-
-没有桥接配置时，设备仍会进入 Photos，Work 显示离线。需要联网时从
-Tools → MAC BRIDGE 是 Mac 桥接快捷入口；Connect 单独负责打开私有配网页：
-
-1. Mac 或手机连接 `M5StopWatch-0AC1`。
-2. 打开 `http://192.168.4.1`。
-3. 填 2.4GHz Wi‑Fi、`ws://<Mac局域网IP>:8790/sinan` 和配对令牌。
-4. 保存并关闭页面，设备自动重启。
-
-配网是当前唯一需要用户输入 Wi‑Fi 密码的步骤；程序不会读取或显示该密码。
-
-## 构建与烧录
-
-使用 ESP‑IDF 5.5.4：
+## 十五分钟上手
 
 ```bash
-export IDF_TOOLS_PATH=/path/to/.espressif
-. /path/to/esp-idf-v5.5.4/export.sh
-idf.py build
-idf.py -p /dev/cu.usbmodem2101 app-flash
+./scripts/sync_upstream.sh     # 拉官方 HAL/launcher/assets（MIT）
+python3 fetch_repos.py         # 拉组件（mooncake/lvgl/...）
+# 改 main/sinan/config.h 填 WiFi 与 daemon 地址（不填也能用 BLE 两条线）
+idf.py flash monitor
 ```
 
-只刷应用分区不会擦除 NVS 或照片存储。
+Mac 端：`cd daemon && ./install.sh && python3 sinand.py`
 
-## 验收
+## 开发闭环
 
-```bash
-python3 daemon/test_security_and_voice.py
-python3 daemon/test_voice_autosend.py
-python3 daemon/test_sources.py
-```
+| 工具 | 干什么 |
+|---|---|
+| `tools/ctl.py` | 串口控制台：`S` 自测、`I approval` 注假审批、`a/A/C` 注按键 |
+| `tools/screenshot.py` | `P` 截屏存 PNG |
+| `web/prototype/` | 浏览器评审四层 UI，`python3 -m http.server -d web/prototype` |
+| `scripts/export_design_tokens.py` | 从 `design.h` 导出 tokens.json 给 web 原型 |
 
-`test_voice_autosend.py` 的历史文件名保留，但测试内容已经改为“A 转写、B 发送”。
+重构规格与验收清单：`docs/REFACTOR_SPEC.md`。设计令牌唯一来源：`main/sinan/design.h`。

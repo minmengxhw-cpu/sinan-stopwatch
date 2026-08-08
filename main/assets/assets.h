@@ -32,10 +32,6 @@ LV_IMG_DECLARE(alarm_icon);
 LV_IMG_DECLARE(icon_edit_badge);
 LV_IMG_DECLARE(go_home_guide);
 LV_IMG_DECLARE(icon_bat_lightning);
-LV_IMG_DECLARE(icon_photos);
-LV_IMG_DECLARE(icon_incense);
-LV_IMG_DECLARE(icon_approval);
-LV_IMG_DECLARE(icon_connect);
 
 LV_IMG_DECLARE(big_number_0);
 LV_IMG_DECLARE(big_number_1);

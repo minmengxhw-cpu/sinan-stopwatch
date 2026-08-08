@@ -37,25 +37,11 @@ struct UploadRequest {
     std::vector<uint8_t> data;
 };
 
-struct ConnectionState {
-    bool configured = false;
-    std::string uri;
-};
-
-struct ConnectionRequest {
-    std::string ssid;
-    std::string password;
-    std::string uri;
-    std::string token;
-};
-
 using UploadHandler    = std::function<bool(const UploadRequest&, std::string&)>;
 using StateHandler     = std::function<BadgeState()>;
 using ImageHandler     = std::function<bool(std::size_t, ImageData&, std::string&)>;
 using SetActiveHandler = std::function<bool(std::size_t, std::string&)>;
 using DeleteHandler    = std::function<bool(std::size_t, std::string&)>;
-using ConnectionStateHandler = std::function<ConnectionState()>;
-using SaveConnectionHandler  = std::function<bool(const ConnectionRequest&, std::string&)>;
 
 struct Callbacks {
     UploadHandler onUpload;
@@ -63,8 +49,6 @@ struct Callbacks {
     ImageHandler onGetImage;
     SetActiveHandler onSetActive;
     DeleteHandler onDelete;
-    ConnectionStateHandler onGetConnection;
-    SaveConnectionHandler onSaveConnection;
 };
 
 bool run(const std::function<void(std::string_view)>& onLog, const Callbacks& callbacks);

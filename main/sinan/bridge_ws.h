@@ -11,20 +11,16 @@
 
 namespace sinan::ws {
 
-void start(const char* ssid, const char* pass, const char* uri, const char* token);
+void start(const char* ssid, const char* pass, const char* uri);
 bool connected();
 
 // 发一行 JSON。未连接时返回 false，调用方自己决定要不要重试
 bool send(const std::string& json);
 
 // 语音上行。pcm 是 16k 单声道 s16le
-bool send_audio_begin(const char* target);
+bool send_audio_begin();
 bool send_audio_chunk(const int16_t* pcm, size_t samples, uint32_t seq);
 bool send_audio_end();
-bool send_audio_cancel();
-
-// 把已经转写并在屏上确认过的文本发给当前编程工具。
-bool send_voice(const char* target);
 
 // 触发 daemon 白名单动作
 bool trigger(const char* action_id);

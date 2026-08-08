@@ -226,31 +226,6 @@
       margin-top: 8px;
     }
 
-    input[type="text"],
-    input[type="password"] {
-      width: 100%;
-      margin-top: 8px;
-      padding: 13px 14px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: white;
-      color: var(--text);
-      font: inherit;
-    }
-
-    .connection-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 14px;
-    }
-
-    .connection-note {
-      margin: 0 0 14px;
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.55;
-    }
-
     .actions {
       display: grid;
       gap: 10px;
@@ -363,29 +338,13 @@
       .color-row {
         grid-template-columns: 1fr;
       }
-
-      .connection-grid {
-        grid-template-columns: 1fr;
-      }
     }
   </style>
 </head>
 
 <body>
   <main class="card">
-    <h1>SINAN Setup</h1>
-
-    <section class="panel" style="margin-top:20px">
-      <h2>Connect to your Mac</h2>
-      <p class="connection-note">The password and pairing token stay on this watch. They are never shown again by this page.</p>
-      <div class="connection-grid">
-        <label>Wi-Fi name<input id="wifiSsid" type="text" maxlength="32" autocomplete="off" /></label>
-        <label>Wi-Fi password<input id="wifiPassword" type="password" maxlength="63" autocomplete="new-password" /></label>
-        <label>Mac WebSocket address<input id="bridgeUri" type="text" value="ws://192.168.124.29:8790/sinan" autocomplete="off" /></label>
-        <label>Pairing token<input id="bridgeToken" type="password" maxlength="128" autocomplete="new-password" /></label>
-      </div>
-      <div class="actions"><button id="saveConnection" type="button">Save connection</button></div>
-    </section>
+    <h1>Badge Manager</h1>
 
     <section class="section-grid">
       <section class="panel">
@@ -451,11 +410,6 @@
     const zoomRange = document.getElementById('zoomRange');
     const bgColorInput = document.getElementById('bgColor');
     const context = previewCanvas.getContext('2d');
-    const wifiSsid = document.getElementById('wifiSsid');
-    const wifiPassword = document.getElementById('wifiPassword');
-    const bridgeUri = document.getElementById('bridgeUri');
-    const bridgeToken = document.getElementById('bridgeToken');
-    const saveConnectionButton = document.getElementById('saveConnection');
 
     const editorState = {
       image: null,
@@ -691,36 +645,6 @@
       setStatus('OK');
     }
 
-    async function loadConnectionState() {
-      const state = await fetchJson('/sinan/config');
-      if (state.uri) bridgeUri.value = state.uri;
-      if (state.configured) setStatus('Mac connection is configured. Enter all four fields to replace it.');
-    }
-
-    async function saveConnection() {
-      saveConnectionButton.disabled = true;
-      setStatus('Saving connection...');
-      try {
-        const result = await fetchJson('/sinan/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ssid: wifiSsid.value.trim(),
-            password: wifiPassword.value,
-            uri: bridgeUri.value.trim(),
-            token: bridgeToken.value.trim(),
-          }),
-        });
-        wifiPassword.value = '';
-        bridgeToken.value = '';
-        setStatus(result.message || 'Saved. Tap Done to restart the watch.');
-      } catch (error) {
-        setStatus(error.message || 'Could not save connection.', true);
-      } finally {
-        saveConnectionButton.disabled = false;
-      }
-    }
-
     fileInput.addEventListener('change', async () => {
       const file = fileInput.files && fileInput.files[0];
       if (!file) {
@@ -824,12 +748,11 @@
     setActiveButton.addEventListener('click', () => setActive(editorState.selectedSlot));
     deleteSlotButton.addEventListener('click', () => deleteSlot(editorState.selectedSlot));
     closeButton.addEventListener('click', closePage);
-    saveConnectionButton.addEventListener('click', saveConnection);
 
     drawPreview();
     setBusy(true);
     refreshState().then(() => {
-      return loadConnectionState();
+      setStatus('OK');
     }).catch((error) => {
       setStatus(error.message || 'Failed to load badge slots.', true);
     }).finally(() => {
