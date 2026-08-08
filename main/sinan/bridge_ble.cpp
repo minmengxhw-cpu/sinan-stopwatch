@@ -71,6 +71,14 @@ struct XferCtx {
     size_t written = 0;
 };
 
+// 校验单级路径片段：拒绝空串、'/'、'\\'、以及 "." "..",
+// 防止桌面端传来的 name/path 借 ".." 跳出预期目录（任意文件读写/清空）
+bool is_safe_component(const std::string& s)
+{
+    if (s.empty() || s == "." || s == "..") return false;
+    return s.find('/') == std::string::npos && s.find('\\') == std::string::npos;
+}
+
 // 收到新一批照片前先清空旧的，否则 4MB 分区几批就满了
 void wipe_dir(const std::string& dir)
 {
@@ -218,6 +226,11 @@ void handle_command(JsonDocument& doc)
         if (s_xfer.fp) fclose(s_xfer.fp);
         s_xfer = XferCtx{};
         const std::string name = doc["name"] | "misc";
+        if (!is_safe_component(name)) {
+            ESP_LOGW(TAG, "char_begin: unsafe name rejected");
+            send_ack("char_begin", false);
+            return;
+        }
         s_xfer.dir = "/spiflash/" + name;
         mkdir(s_xfer.dir.c_str(), 0775);
         wipe_dir(s_xfer.dir);
@@ -226,7 +239,12 @@ void handle_command(JsonDocument& doc)
     } else if (std::strcmp(cmd, "file") == 0) {
         if (s_xfer.fp) fclose(s_xfer.fp);
         const std::string path = doc["path"] | "";
-        s_xfer.fp = s_xfer.active ? fopen((s_xfer.dir + "/" + path).c_str(), "wb") : nullptr;
+        s_xfer.fp = (s_xfer.active && is_safe_component(path))
+                        ? fopen((s_xfer.dir + "/" + path).c_str(), "wb")
+                        : nullptr;
+        if (s_xfer.active && !is_safe_component(path)) {
+            ESP_LOGW(TAG, "file: unsafe path rejected");
+        }
         s_xfer.written = 0;
         send_ack("file", s_xfer.fp != nullptr);
     } else if (std::strcmp(cmd, "chunk") == 0) {

@@ -11,7 +11,8 @@
 
 namespace sinan::ws {
 
-void start(const char* ssid, const char* pass, const char* uri);
+// token 为空则不带鉴权头（daemon 侧 token 也留空时才连得上，仅测试用途）
+void start(const char* ssid, const char* pass, const char* uri, const char* token = "");
 bool connected();
 
 // 发一行 JSON。未连接时返回 false，调用方自己决定要不要重试
@@ -21,6 +22,8 @@ bool send(const std::string& json);
 bool send_audio_begin();
 bool send_audio_chunk(const int16_t* pcm, size_t samples, uint32_t seq);
 bool send_audio_end();
+// 用户中途取消录音：告诉 daemon 丢弃这段缓冲，别转写别上传
+bool send_audio_cancel();
 
 // 触发 daemon 白名单动作
 bool trigger(const char* action_id);

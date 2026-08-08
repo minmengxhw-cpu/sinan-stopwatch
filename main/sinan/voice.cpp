@@ -13,6 +13,7 @@ namespace {
 
 std::atomic<bool> s_running{false};
 std::atomic<bool> s_keep{false};
+std::atomic<bool> s_aborted{false};
 TaskHandle_t s_task = nullptr;
 
 // 每片 240ms。太短则 WS 帧太密挤掉 BLE，太长则说完到出结果的延迟明显
@@ -30,11 +31,18 @@ void record_task(void*)
         if (!slice.empty()) ws::send_audio_chunk(slice.data(), slice.size(), seq++);
     }
 
-    ws::send_audio_end();
-
-    VoiceState v = State::get().snapshot().voice;
-    v.phase = VoicePhase::Uploading;
-    State::get().setVoice(v);
+    if (s_aborted.load()) {
+        // 用户中途取消：别发 asr_end（那会让 daemon 转写并把状态推回 Uploading），
+        // 改发 asr_cancel 让 daemon 也丢掉这段缓冲。本地状态 abort() 早就置回 Idle 了，
+        // 这里绝不能再覆盖一次，否则界面会先 Idle 又跳回"上传中"
+        ws::send_audio_cancel();
+        s_aborted.store(false);
+    } else {
+        ws::send_audio_end();
+        VoiceState v = State::get().snapshot().voice;
+        v.phase = VoicePhase::Uploading;
+        State::get().setVoice(v);
+    }
 
     s_running.store(false);
     s_task = nullptr;
@@ -61,6 +69,8 @@ void end() { s_keep.store(false); }
 
 void abort()
 {
+    // 先置 aborted 再落 keep=false，保证 record_task 循环退出时一定能看到 aborted=true
+    s_aborted.store(true);
     s_keep.store(false);
     VoiceState v;
     v.phase = VoicePhase::Idle;

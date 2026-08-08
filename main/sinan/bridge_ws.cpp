@@ -28,6 +28,8 @@ constexpr char TAG[] = "sinan.ws";
 esp_websocket_client_handle_t s_client = nullptr;
 bool s_wifi_up = false;
 std::string s_buf;
+// esp_websocket_client_config_t.headers 只存指针，缓冲区必须活得比 client 久，故用静态存储
+std::string s_ws_headers;
 
 WorkerState parse_state(const char* s)
 {
@@ -187,7 +189,7 @@ void wifi_event(void*, esp_event_base_t base, int32_t id, void*)
 
 }  // namespace
 
-void start(const char* ssid, const char* pass, const char* uri)
+void start(const char* ssid, const char* pass, const char* uri, const char* token)
 {
     if (nvs_flash_init() == ESP_ERR_NVS_NO_FREE_PAGES) {
         nvs_flash_erase();
@@ -217,6 +219,11 @@ void start(const char* ssid, const char* pass, const char* uri)
     wsc.network_timeout_ms   = 8000;
     // 15 秒心跳。调更短会跟 BLE 抢时隙，Ward 那边会开始丢心跳
     wsc.ping_interval_sec    = 15;
+    // 带上配对令牌，daemon 侧同网段但没有这个 token 的设备会被拒绝握手
+    if (token && token[0] != '\0') {
+        s_ws_headers = std::string("X-Sinan-Token: ") + token + "\r\n";
+        wsc.headers  = s_ws_headers.c_str();
+    }
     s_client = esp_websocket_client_init(&wsc);
     esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY, ws_event, nullptr);
     ESP_LOGI(TAG, "ws target %s", uri);
@@ -263,6 +270,7 @@ bool send_audio_chunk(const int16_t* pcm, size_t samples, uint32_t seq)
 }
 
 bool send_audio_end() { return send("{\"t\":\"asr_end\"}"); }
+bool send_audio_cancel() { return send("{\"t\":\"asr_cancel\"}"); }
 
 bool trigger(const char* action_id)
 {

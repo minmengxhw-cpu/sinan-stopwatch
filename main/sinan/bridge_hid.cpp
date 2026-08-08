@@ -298,14 +298,18 @@ const ble_gatt_chr_def kChrs[] = {
         .flags     = BLE_GATT_CHR_F_READ,
     },
     {
+        // 未配对/未加密链路不允许写 Control Point：否则未鉴权的中心设备
+        // 也能触发 Suspend/Exit-Suspend 之类的控制指令
         .uuid      = &kUuidCtrlPoint.u,
         .access_cb = ctrl_point_access,
-        .flags     = BLE_GATT_CHR_F_WRITE_NO_RSP,
+        .flags     = BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC,
     },
     {
+        // 同上：Protocol Mode 决定 Boot/Report 协议切换，也必须要求加密后才可写
         .uuid      = &kUuidProtoMode.u,
         .access_cb = proto_mode_access,
-        .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE_NO_RSP,
+        .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE_NO_RSP |
+                     BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC,
     },
     {
         .uuid        = &kUuidReport.u,
@@ -328,9 +332,11 @@ const ble_gatt_chr_def kChrs[] = {
         .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
     },
     {
+        // Boot Output 同样能驱动 report_out_access，跟上面 Report(out) 保持一致要求加密
         .uuid      = &kUuidBootOut.u,
         .access_cb = report_out_access,
-        .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+        .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
+                     BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC,
     },
     {},
 };

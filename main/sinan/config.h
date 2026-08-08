@@ -14,6 +14,11 @@
 // Mac 上 sinand.py 的地址。查本机 IP：ipconfig getifaddr en0
 #define SN_WS_URI "ws://192.168.1.100:8790/sinan"
 
+// 与 daemon/config.toml 里 [daemon].token 保持一致的配对令牌。
+// 留空 = 不发送，daemon 那边 token 也留空时才能连上（同网段任何设备都能连，仅测试用）。
+// 生产环境务必两边都填一个随机字符串，防止同一 WiFi 下的其它设备冒充配对设备。
+#define SN_WS_TOKEN ""
+
 // BLE HID 键盘通道（Action 层 OK/NG/文本注入）。关掉则只剩 Buddy + WS
 #define SN_HID_ENABLE 1
 

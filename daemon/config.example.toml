@@ -5,6 +5,10 @@ bind = "0.0.0.0"
 port = 8790
 # 命令在干净环境执行，不受你 shell 配置污染。按需补 PATH
 path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# 配对令牌：非空时，握手请求必须带 "X-Sinan-Token: <token>" 头才放行，
+# 同一段局域网内的其它设备光靠"内网 IP"不再能连上这条控制通道。
+# 设备端把同样的值填进 main/sinan/config.h 的 SN_WS_TOKEN。留空 = 不校验（不建议）。
+token = ""
 fleet_interval   = 20     # Fleet 推送间隔（秒）
 almanac_interval = 3600   # Almanac 推送间隔（秒）
 
@@ -49,7 +53,8 @@ source = "~/.sinan/almanac.sh"
 # ---------------------------------------------------------------- voice
 #
 # 全本地链路，不接任何云端语音服务。
-# {wav} 会被替换成录音文件路径，{text} 会被替换成转写结果（已 JSON 转义）。
+# {wav} 会被替换成录音文件路径，{text} 会被替换成转写结果（已用 shlex.quote 做
+# shell 单引号转义，$()/反引号等命令替换语法不会被 bash 展开）。
 
 [voice]
 asr_cmd   = "whisper-cli -m ~/models/ggml-large-v3-turbo.bin -f {wav} -l zh --no-timestamps -np 2>/dev/null | tail -1"

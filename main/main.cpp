@@ -56,7 +56,7 @@ extern "C" void app_main(void)
 
     // WiFi + WS：连不上也无所谓，审批与 HID 照常工作
 #if SN_WS_ENABLE
-    sinan::ws::start(SN_WIFI_SSID, SN_WIFI_PASS, SN_WS_URI);
+    sinan::ws::start(SN_WIFI_SSID, SN_WIFI_PASS, SN_WS_URI, SN_WS_TOKEN);
 #endif
 
     const int id_shell = GetMooncake().installApp(std::make_unique<AppSinan>());

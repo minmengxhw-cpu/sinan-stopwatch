@@ -6,6 +6,7 @@
  */
 #pragma once
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -143,9 +144,14 @@ public:
     void clearPasskey();
 
 private:
-    State() = default;
+    State();
     Snapshot _s;
-    portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
+    // 之前用 portMUX_TYPE 自旋锁（关中断），但 Snapshot 里一堆 std::string/array<string>，
+    // 逐字段拷贝随时可能触发 malloc/free —— 在关中断区间里做堆分配，耗时不确定，
+    // 会拖慢/卡住同核心上的其它中断（含 BLE 协议栈的定时收发）。
+    // 全部访问都发生在任务上下文（网络线程写、UI 线程读），不是 ISR，
+    // 换成可阻塞的 FreeRTOS 互斥量才是对的：临界区可以安心做堆分配。
+    SemaphoreHandle_t _mutex;
 };
 
 }  // namespace sinan
