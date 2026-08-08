@@ -1,0 +1,19 @@
+{
+  "_comment": "Tighter head-only pass after side-by-side review. Centers favor the eyes and muzzle; radii exclude torso while retaining the full visible ears and chin.",
+  "01.jpg": {"cx": 300, "cy": 235, "r": 210},
+  "02.jpg": {"cx": 300, "cy": 175, "r": 230},
+  "03.jpg": {"cx": 240, "cy": 220, "r": 225},
+  "04.jpg": {"cx": 365, "cy": 195, "r": 195},
+  "05.jpg": {"cx": 240, "cy": 205, "r": 205},
+  "06.jpg": {"cx": 270, "cy": 210, "r": 195},
+  "07.jpg": {"cx": 270, "cy": 245, "r": 240},
+  "08.jpg": {"cx": 265, "cy": 240, "r": 225},
+  "09.jpg": {"cx": 305, "cy": 205, "r": 210},
+  "10.jpg": {"cx": 270, "cy": 250, "r": 235},
+  "11.jpg": {"cx": 290, "cy": 160, "r": 125},
+  "12.jpg": {"cx": 235, "cy": 220, "r": 225},
+  "13.jpg": {"cx": 270, "cy": 210, "r": 205},
+  "14.jpg": {"cx": 390, "cy": 175, "r": 155},
+  "15.jpg": {"cx": 275, "cy": 220, "r": 220},
+  "16.jpg": {"cx": 300, "cy": 220, "r": 225}
+}

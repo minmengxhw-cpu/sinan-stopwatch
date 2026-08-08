@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>司南 · 圈主体</title>
+<!--
+  为什么有这个页面：自动圈主体解不了。
+  试过按冷暖分割（木地板也是暖的）、按白毛定位（半径全靠蒙），
+  两套都在四成照片上失手。任意宠物照的主体定位不是颜色启发式能解的问题。
+
+  所以判断交给人，机器只做机械活 —— 跟守那一页是同一个原则。
+  十六张照片十分钟，而且每张都对。
+
+  用法：浏览器打开本文件 → 拖进照片 → 每张拖一个圈 → 导出 crops.json
+        python3 scripts/prep_photos.py --crops crops.json 照片...
+-->
+<style>
+  :root{--ink:#0B0B0C;--panel:#141416;--line:#26262A;--bronze:#C8A96E;
+        --silk:#F2EDE1;--dim:#8A857B;--malachite:#4FA88A;--cinnabar:#D6442F}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ink);color:var(--silk);
+       font:400 14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+  header{padding:20px 24px;border-bottom:1px solid var(--line);
+         display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+         position:sticky;top:0;background:var(--ink);z-index:10}
+  h1{margin:0;font:500 17px/1 inherit;letter-spacing:.16em}
+  .hint{color:var(--dim);font-size:13px;flex:1;min-width:260px}
+  button{background:var(--panel);color:var(--silk);border:1px solid var(--line);
+         border-radius:8px;padding:9px 16px;font:500 13px/1 inherit;cursor:pointer}
+  button:hover{border-color:var(--bronze)}
+  button.go{background:var(--bronze);color:#141210;border-color:var(--bronze)}
+  #drop{margin:24px;padding:56px;border:1px dashed var(--line);border-radius:16px;
+        text-align:center;color:var(--dim)}
+  #drop.over{border-color:var(--bronze);color:var(--silk)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));
+        gap:22px;padding:24px}
+  .cell{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+        padding:12px;position:relative}
+  .cell canvas{width:100%;display:block;border-radius:8px;cursor:crosshair;touch-action:none}
+  .row{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:12px}
+  .name{color:var(--dim);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+        font-family:ui-monospace,Menlo,monospace}
+  .date{color:var(--bronze);font-family:ui-monospace,Menlo,monospace}
+  .mode{background:transparent;color:var(--dim);border:1px solid var(--line);
+        border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer}
+  .mode.disc{color:var(--malachite);border-color:var(--malachite)}
+  .cell.unset{outline:1px solid var(--cinnabar);outline-offset:-1px}
+  textarea{width:calc(100% - 48px);margin:0 24px 40px;height:180px;background:var(--panel);
+           color:var(--silk);border:1px solid var(--line);border-radius:10px;padding:14px;
+           font:12px/1.5 ui-monospace,Menlo,monospace}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>司南 · 圈主体</h1>
+  <span class="hint">在每张图上<b>按住拖动</b>画一个圈，把团团圈进去。蜷成球的点一下右边切成 disc。</span>
+  <button id="auto">全部套用默认圈</button>
+  <button class="go" id="out">导出 crops.json</button>
+</header>
+
+<div id="drop">把照片拖到这里，或点击选择<input id="file" type="file" multiple accept="image/*" hidden></div>
+<div class="grid" id="grid"></div>
+<textarea id="json" placeholder="导出的 JSON 会出现在这里，存成 crops.json"></textarea>
+
+<script>
+const grid = document.getElementById('grid');
+const drop = document.getElementById('drop');
+const fileIn = document.getElementById('file');
+const items = [];   // {name, img, cx, cy, r, mode, canvas, set}
+
+drop.onclick = () => fileIn.click();
+fileIn.onchange = e => load([...e.target.files]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); load([...e.dataTransfer.files]); };
+
+function load(files){
+  files.filter(f => f.type.startsWith('image/')).forEach(f => {
+    const img = new Image();
+    img.onload = () => addCell(f.name, img);
+    img.src = URL.createObjectURL(f);
+  });
+  drop.style.display = 'none';
+}
+
+function addCell(name, img){
+  const cell = document.createElement('div');
+  cell.className = 'cell unset';
+  const cv = document.createElement('canvas');
+  const W = 560, H = Math.round(W * img.height / img.width);
+  cv.width = W; cv.height = H;
+  cell.appendChild(cv);
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `<span class="name">${name}</span><span class="date"></span>`;
+  const modeBtn = document.createElement('button');
+  modeBtn.className = 'mode'; modeBtn.textContent = 'portrait';
+  row.appendChild(modeBtn);
+  cell.appendChild(row);
+  grid.appendChild(cell);
+
+  // 默认给一个居中的保守圈，直接导出也不会是空的
+  const it = { name, img, cx: img.width/2, cy: img.height/2,
+               r: Math.round(Math.min(img.width, img.height) * 0.34),
+               mode: 'portrait', cv, cell, set: false, scale: img.width / W };
+  items.push(it);
+  draw(it);
+
+  modeBtn.onclick = () => {
+    it.mode = it.mode === 'disc' ? 'portrait' : 'disc';
+    modeBtn.textContent = it.mode;
+    modeBtn.classList.toggle('disc', it.mode === 'disc');
+    draw(it);
+  };
+
+  let dragging = false, sx = 0, sy = 0;
+  const pos = e => {
+    const b = cv.getBoundingClientRect();
+    const k = cv.width / b.width;
+    return [(e.clientX - b.left) * k, (e.clientY - b.top) * k];
+  };
+  cv.onpointerdown = e => { cv.setPointerCapture(e.pointerId); dragging = true; [sx, sy] = pos(e); };
+  cv.onpointermove = e => {
+    if (!dragging) return;
+    const [x, y] = pos(e);
+    it.cx = Math.round((sx + x) / 2 * it.scale);
+    it.cy = Math.round((sy + y) / 2 * it.scale);
+    it.r  = Math.round(Math.hypot(x - sx, y - sy) / 2 * it.scale);
+    it.set = true; cell.classList.remove('unset');
+    draw(it);
+  };
+  cv.onpointerup = () => { dragging = false; };
+}
+
+function draw(it){
+  const g = it.cv.getContext('2d');
+  const W = it.cv.width, H = it.cv.height;
+  g.clearRect(0, 0, W, H);
+  g.drawImage(it.img, 0, 0, W, H);
+
+  // 圈外压暗，圈内保持原样 —— 这就是设备上晕影之后的样子
+  g.save();
+  g.beginPath(); g.rect(0, 0, W, H);
+  g.arc(it.cx / it.scale, it.cy / it.scale, it.r / it.scale, 0, Math.PI * 2, true);
+  g.fillStyle = 'rgba(0,0,0,.72)'; g.fill('evenodd');
+  g.restore();
+
+  g.beginPath();
+  g.arc(it.cx / it.scale, it.cy / it.scale, it.r / it.scale, 0, Math.PI * 2);
+  g.strokeStyle = it.mode === 'disc' ? '#4FA88A' : '#C8A96E';
+  g.lineWidth = 2; g.stroke();
+}
+
+document.getElementById('auto').onclick = () => {
+  items.forEach(it => { it.set = true; it.cell.classList.remove('unset'); });
+};
+
+document.getElementById('out').onclick = () => {
+  const o = {};
+  items.forEach(it => { o[it.name] = { cx: it.cx, cy: it.cy, r: it.r, mode: it.mode }; });
+  const txt = JSON.stringify(o, null, 1);
+  document.getElementById('json').value = txt;
+  navigator.clipboard?.writeText(txt);
+  const b = new Blob([txt], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(b); a.download = 'crops.json'; a.click();
+};
+</script>
+</body>
+</html>

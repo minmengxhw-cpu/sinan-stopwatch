@@ -1,0 +1,28 @@
+# ESP-IDF generated output and local configuration
+build/
+build-v4/
+sdkconfig
+sdkconfig.old
+/.idf.py
+
+# Reproducible upstream/component checkouts; fetch with fetch_repos.py and IDF
+components/
+managed_components/
+
+# Local daemon configuration may contain machine paths and runtime secrets.
+daemon/config.toml
+daemon/*.log
+daemon/*.pid
+
+# Python and editor caches
+__pycache__/
+*.py[cod]
+.DS_Store
+.idea/
+.vscode/
+
+# Never publish private key material, including upstream example certificates.
+*.pem
+*.key
+*.p12
+*.pfx

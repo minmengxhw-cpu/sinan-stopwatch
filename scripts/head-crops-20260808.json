@@ -1,0 +1,19 @@
+{
+  "_comment": "Second-pass crops from the supplied 536x536 device assets. Each crop includes the whole visible head plus breathing room so ears, muzzle, and chin remain inside the round frame.",
+  "01.jpg": {"cx": 300, "cy": 240, "r": 245},
+  "02.jpg": {"cx": 300, "cy": 220, "r": 270},
+  "03.jpg": {"cx": 240, "cy": 230, "r": 270},
+  "04.jpg": {"cx": 370, "cy": 220, "r": 250},
+  "05.jpg": {"cx": 235, "cy": 225, "r": 235},
+  "06.jpg": {"cx": 270, "cy": 220, "r": 240},
+  "07.jpg": {"cx": 270, "cy": 250, "r": 285},
+  "08.jpg": {"cx": 265, "cy": 250, "r": 270},
+  "09.jpg": {"cx": 300, "cy": 225, "r": 265},
+  "10.jpg": {"cx": 270, "cy": 260, "r": 285},
+  "11.jpg": {"cx": 290, "cy": 165, "r": 155},
+  "12.jpg": {"cx": 235, "cy": 230, "r": 270},
+  "13.jpg": {"cx": 270, "cy": 230, "r": 245},
+  "14.jpg": {"cx": 390, "cy": 180, "r": 210},
+  "15.jpg": {"cx": 275, "cy": 230, "r": 270},
+  "16.jpg": {"cx": 300, "cy": 235, "r": 260}
+}

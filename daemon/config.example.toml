@@ -1,0 +1,89 @@
+# sinand 配置。首次运行 sinand.py 会自动复制这份为 config.toml。
+
+[daemon]
+bind = "0.0.0.0"
+port = 8790
+# 命令在干净环境执行，不受你 shell 配置污染。按需补 PATH
+path = "/Users/cheer/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+fleet_interval   = 20     # Fleet 推送间隔（秒）
+almanac_interval = 3600   # Almanac 推送间隔（秒）
+
+[security]
+# 首次启动自动生成，权限为 0600。不要把内容贴进聊天或提交到仓库。
+token_file = "~/.sinan/bridge.token"
+
+# ---------------------------------------------------------------- worker
+#
+# 每个 worker 一个探针。约定：探针在 stdout 输出一行 JSON：
+#   {"state":"run|idle|stall","quota":0.62,"task":"当前在干嘛"}
+# 探针挂了不会拖垮推送，那一段会显示成 offline。
+#
+# quota 的口径由你自己定义 —— 设备端只管把弧画短，不做业务判断。
+
+[[worker]]
+id      = "codex"
+label   = "CODEX"
+kind    = "cli"
+command = "codex"
+active_pattern = "codex .* exec|codex-exec"
+online_task = "ready for voice"
+running_task = "voice instruction"
+
+[[worker]]
+id     = "paseo"
+label  = "PASEO"
+kind   = "paseo"
+agents = "~/.paseo/agents"
+
+[[worker]]
+id      = "grok"
+label   = "GROK"
+kind    = "cli"
+command = "grok"
+active_pattern = "grok .*--single|grok .* -p "
+online_task = "ready for voice"
+running_task = "voice instruction"
+
+# ---------------------------------------------------------------- almanac
+#
+# 输出一行 JSON：
+#   {"number":{"code":"0731","title":"..."},
+#    "huangli":{"trend":"up|flat|down","yi":"深度工作","ji":"连续会议"},
+#    "ring":[{"doy":218,"tag":"盟史 #412"}]}
+
+[almanac]
+number_archive = "~/.local/share/the-machine/archive/numbers"
+# 可选：若需要补充黄历/年轮，可配置只读 JSON 输出命令。
+# source = "~/.sinan/almanac.sh"
+
+# ---------------------------------------------------------------- voice
+#
+# 全本地链路，不接任何云端语音服务。
+# {wav} 会被替换成录音文件路径。
+
+[voice]
+asr_cmd   = "/opt/homebrew/bin/whisper-cli -m /Users/cheer/.sinan/models/ggml-large-v3-turbo-q5_0.bin -f {wav} -l zh --no-timestamps --no-prints --threads 8 2>/dev/null"
+tts_voice = "Tingting"
+
+# ---------------------------------------------------------------- programming
+# A 录音、A 停止转写、B 确认后，指令只会路由到以下三个固定实现。
+# 用户说的话作为独立 argv 传入，不会拼进 shell。
+
+[programming]
+cwd = "~/Documents/Codex/2026-08-08/zhe"
+timeout = 600
+codex_timeout = 300
+codex_cmd = "/Users/cheer/.local/bin/codex"
+codex_transport = "app-server"
+codex_socket = "~/.codex/app-server-control/app-server-control.sock"
+codex_model = "gpt-5.6-terra"
+codex_reasoning = "low"
+paseo_cmd = "/Users/cheer/.local/bin/paseo"
+grok_cmd = "/Users/cheer/.local/bin/grok"
+paseo_provider = "claude"
+paseo_mode = "auto"
+grok_mode = "default"
+
+# ---------------------------------------------------------------- action
+#
+# 设备端动作只保留 daily_number；配置不能新增 shell 命令。
