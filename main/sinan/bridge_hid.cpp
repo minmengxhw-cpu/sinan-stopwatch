@@ -346,7 +346,7 @@ const ble_gatt_svc_def kSvcs[] = {
 
 /* --------------------------- GAP 监听 --------------------------- */
 
-void gap_listener(ble_gap_event* ev, void*)
+int gap_listener(ble_gap_event* ev, void*)
 {
     switch (ev->type) {
         case BLE_GAP_EVENT_CONNECT:
@@ -369,6 +369,7 @@ void gap_listener(ble_gap_event* ev, void*)
         default:
             break;
     }
+    return 0;
 }
 
 }  // namespace

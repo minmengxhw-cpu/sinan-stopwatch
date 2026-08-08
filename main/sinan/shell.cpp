@@ -27,7 +27,6 @@
 namespace sinan::shell {
 
 using namespace design;
-using mooncake::mclog;
 
 namespace {
 

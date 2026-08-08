@@ -31,7 +31,6 @@ namespace sinan::layer_rest {
 using namespace design;
 namespace ui = sinan::ui;
 namespace photo = sinan::photo;
-using mooncake::mclog;
 
 namespace {
 

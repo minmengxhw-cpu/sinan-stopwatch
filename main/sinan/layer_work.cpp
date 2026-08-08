@@ -19,7 +19,6 @@ namespace sinan::layer_work {
 
 using namespace design;
 namespace ui = sinan::ui;
-using mooncake::mclog;
 
 namespace {
 

@@ -15,12 +15,16 @@
 #endif
 #include <ArduinoJson.h>
 #include <esp_log.h>
+#include <esp_random.h>
 #include <hal/hal.h>
 #include <esp_heap_caps.h>
 #include <mbedtls/base64.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <dirent.h>
+#include <algorithm>
 #include <cstdio>
+#include <vector>
 #include "photo_store.h"
 
 #include <host/ble_hs.h>

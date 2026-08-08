@@ -10,11 +10,13 @@
 #include <esp_crt_bundle.h>
 #include <esp_event.h>
 #include <esp_log.h>
+#include <esp_netif.h>
 #include <esp_websocket_client.h>
 #include <esp_wifi.h>
 #include <hal/hal.h>
 #include <mbedtls/base64.h>
 #include <nvs_flash.h>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 

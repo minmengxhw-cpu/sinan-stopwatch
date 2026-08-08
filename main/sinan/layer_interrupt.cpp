@@ -22,7 +22,6 @@ namespace sinan::layer_interrupt {
 
 using namespace design;
 namespace ui = sinan::ui;
-using mooncake::mclog;
 
 namespace {
 

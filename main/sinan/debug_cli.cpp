@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <sys/time.h>
 #include <vector>
 
 namespace sinan::debug {
